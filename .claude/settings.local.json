@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go get *)",
+      "Bash(go mod *)",
+      "Bash(go build *)",
+      "Bash(go fmt *)",
+      "Bash(go run *)",
+      "Bash(curl -s -X POST http://localhost:8080/api/danmaku -H 'Content-Type: application/json' -d '{\"content\":\"冒烟测试\",\"user_id\":\"tester\"}')",
+      "Bash(curl -s -o /dev/null -w \"HTTP %{http_code}\" http://localhost:8080/)",
+      "Bash(kill %1)",
+      "Bash(wait %1)",
+      "Bash(go vet *)",
+      "Bash(git add *)"
+    ]
+  }
+}
