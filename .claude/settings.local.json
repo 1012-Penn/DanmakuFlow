@@ -11,7 +11,22 @@
       "Bash(kill %1)",
       "Bash(wait %1)",
       "Bash(go vet *)",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "Bash(curl -s \"https://api.github.com/repos/1012-Penn/1012Penn.github.io/actions/runs\")",
+      "Bash(curl -s \"https://api.github.com/repos/1012-Penn/1012Penn.github.io/actions/runs/28924355225/jobs\")",
+      "Bash(git commit *)",
+      "Bash(git push *)",
+      "Bash(curl -s \"https://api.github.com/repos/1012-Penn/1012Penn.github.io/actions/runs/28924518623/jobs\")",
+      "Bash(curl -s \"https://api.github.com/repos/1012-Penn/1012Penn.github.io/actions/runs/28924518623\")",
+      "Bash(curl -s -o /dev/null -w \"HTTP %{http_code}\" \"https://1012-Penn.github.io/\")",
+      "Bash(curl -s \"https://1012-Penn.github.io/\")",
+      "Bash(curl -s \"https://api.github.com/repos/1012-Penn/1012Penn.github.io/pages\")",
+      "Bash(lsof -ti:8080)",
+      "Bash(xargs kill -9)",
+      "Bash(curl -s -X POST http://localhost:8080/api/danmaku -H \"Content-Type: application/json\" -d '{\"content\":\"hello\",\"user_id\":\"u1\",\"room_id\":\"abc\"}')",
+      "Bash(curl -s -X POST http://localhost:8080/api/danmaku -H \"Content-Type: application/json\" -d '{\"content\":\"hello\",\"user_id\":\"u1\"}')",
+      "Bash(curl -s http://localhost:8080/api/danmaku)",
+      "Bash(python3 -m json.tool)"
     ]
   }
 }

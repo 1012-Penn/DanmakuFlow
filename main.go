@@ -11,9 +11,8 @@ import (
 func main() {
 	r := gin.Default()
 
-	// 创建 Hub 并启动事件循环（单独的 goroutine，不阻塞主线程）
+	// 创建 Hub（房间管理器）
 	hub := websocket.NewHub()
-	go hub.Run()
 
 	// 组装依赖：Store → Handler
 	// Store 负责数据存取，Handler 依赖 Store 和 Hub

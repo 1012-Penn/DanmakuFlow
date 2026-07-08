@@ -7,77 +7,83 @@ import (
 )
 
 const (
-	// 写超时：10 秒内写不完一条消息就断开
+	// 写超时：10 秒内写不完就断开
 	writeWait = 10 * time.Second
 
-	// 等待 Pong 超时：60 秒没收到客户端的 Pong 就认为断开
+	// 等 Pong 的最长时间：60 秒收不到 Pong 就认为客户端死了
 	pongWait = 60 * time.Second
 
-	// Ping 间隔 = Pong 超时的 90%，留出网络延迟余量
+	// Ping 发送间隔 = Pong 等待时间的 90%，留有余量
 	pingPeriod = (pongWait * 9) / 10
 
-	// 单条消息最大字节数，防止恶意客户端撑爆内存
+	// 最大消息大小：512 字节，超过就断开
 	maxMessageSize = 512
 )
 
-// Client 封装一条 WebSocket 连接。
+// Client 管理一个 WebSocket 连接
 //
-// 每个 Client 运行两个 goroutine：
-//   - readPump:  从 conn 读消息 → 转发到 hub.broadcast
-//   - writePump: 从 send channel 取消息 → 写入 conn
+// 每个 Client 有两个 goroutine：
+//   - readPump:  从 conn 读消息 → 发给 room.broadcast
+//   - writePump: 从 send channel 取消息 → 写到 conn
 //
-// 读写分离，互不阻塞。
+// hub 和 room 字段保存所属的管理器引用。
 type Client struct {
-	hub  *Hub            // 归属的 Hub（断开时通知注销）
-	conn *websocket.Conn // 底层 WebSocket 连接
-	send chan []byte     // 待发送消息的缓冲队列（容量 256）
+	hub  *Hub            // 所属 Hub（房间管理器）
+	room *Room           // 所属房间
+	conn *websocket.Conn // WebSocket 连接
+	send chan []byte     // 待发送消息缓冲区，容量 256
 }
 
-// NewClient 创建 Client 实例。
-// 调用方需负责注册到 Hub。
-func NewClient(hub *Hub, conn *websocket.Conn) *Client {
+// NewClient 创建一个 Client。
+// 依赖（hub, room, conn）从外部注入。
+func NewClient(hub *Hub, room *Room, conn *websocket.Conn) *Client {
 	return &Client{
 		hub:  hub,
+		room: room,
 		conn: conn,
 		send: make(chan []byte, 256),
 	}
 }
 
-// readPump 从 WebSocket 读取消息并转发给 Hub。
+// readPump 从 WebSocket 连接读消息 → 发给 Room 广播。
 //
-// 运行在自己的 goroutine 中。conn.ReadMessage() 是阻塞调用，
-// 但每个客户端有独立的 goroutine，不会影响其他连接。
+// 这是每个连接唯一一个读 goroutine：只调 conn.ReadMessage()。
+// 断开或出错时执行 defer 清理：通知 Hub 注销自己、关闭 TCP 连接。
 func (c *Client) readPump() {
 	defer func() {
-		// 通知 Hub 清理此客户端，然后关闭 TCP 连接
-		c.hub.unregister <- c
+		// 通知 Room 注销自己，然后关闭 TCP 连接
+		c.room.unregister <- c
 		c.conn.Close()
 	}()
 
-	// 限制消息大小，防止内存攻击
+	// 限制消息大小：超过 512 字节就断开
 	c.conn.SetReadLimit(maxMessageSize)
-	// 设置读超时：每次收到 Pong 就续期，超时自动断开
+	// 设置读超时：从这个时间点开始，最多等 pongWait 时间
 	c.conn.SetReadDeadline(time.Now().Add(pongWait))
+	// 设置 Pong 处理器：收到 Pong 就刷新读超时
 	c.conn.SetPongHandler(func(string) error {
 		c.conn.SetReadDeadline(time.Now().Add(pongWait))
 		return nil
 	})
 
+	// 循环读消息
 	for {
-		_, message, err := c.conn.ReadMessage()
+		_, msg, err := c.conn.ReadMessage()
 		if err != nil {
-			break // 连接断开或超时 → defer 清理
+			// 出错说明客户端断开或超时，结束循环
+			break
 		}
-		// 把收到的消息丢到广播通道，Hub 会分发给所有人
-		c.hub.broadcast <- message
+		// 收到消息 → 发给当前房间的广播通道
+		c.room.broadcast <- msg
 	}
 }
 
-// writePump 从 Hub 接收消息并写入 WebSocket 连接。
+// writePump 从 send channel 取消息 → 写到 WebSocket 连接。
 //
-// 同时负责定时发送 Ping 心跳帧。
-// Hub 不会直接写 conn，而是通过 send channel 投递，避免阻塞广播循环。
+// 同时负责定时发 Ping 保活。
+// send 被关闭时（Room unregister 时做的），自动退出循环。
 func (c *Client) writePump() {
+	// 定时器：每隔 pingPeriod 发一次 Ping
 	ticker := time.NewTicker(pingPeriod)
 	defer func() {
 		ticker.Stop()
@@ -86,20 +92,21 @@ func (c *Client) writePump() {
 
 	for {
 		select {
-		case message, ok := <-c.send:
-			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+		case msg, ok := <-c.send:
+			// ok == false 说明 send channel 被 close 了 → 要断开
 			if !ok {
-				// send channel 被 Hub 关闭 → 连接结束
 				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
 
-			if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
+			// 有消息要发，设置写超时
+			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			if err := c.conn.WriteMessage(websocket.TextMessage, msg); err != nil {
 				return
 			}
 
 		case <-ticker.C:
-			// 定时发送 Ping，readPump 那边靠 PongHandler 续期
+			// 到时间发 Ping 了
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				return

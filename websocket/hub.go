@@ -4,37 +4,27 @@ import (
 	"sync"
 )
 
-// Hub 是 WebSocket 连接的中央管理器。
-//
-// 设计思路：消息路由集中化。
-//   - register / unregister / broadcast 三条 channel 分别处理三种事件
-//   - Run() 单 goroutine 消费所有 channel，map 操作天然无竞争
-//   - 不需要额外的互斥锁保护 clients map
-type Hub struct {
-	// clients 持有所有活跃连接，用 map 实现集合（O(1) 增删）
-	// key  = *Client 指针（作为集合元素）
-	// value = bool（仅表示存在）
-	clients map[*Client]bool
+// Hub 是房间管理器，持有 map[string]*Room。
+// rooms map 用 RWMutex 保护，支持并发读写。
 
-	// broadcast 是消息接收队列。
-	// 任何 goroutine 都可向它发数据，Run() 负责遍历发送。
-	broadcast chan []byte
+// Room表示一个独立的直播间
+// 每个Room有自己的客户端池子和广播通道,房间之间互不干扰
+type Room struct {
+	//房间唯一标识, 比如"liveroom_001"
+	ID string
 
-	// register / unregister 处理客户端连接/断开的通道
+	//这个房间里的所有客户端
+	clients    map[*Client]bool
+	broadcast  chan []byte
 	register   chan *Client
 	unregister chan *Client
-
-	mu     sync.Mutex
-	closed bool
 }
 
-// NewHub 创建 Hub 实例。
-//
-// channel 缓冲区说明：
-//   - broadcast 带 256 缓冲，应对突发消息峰值
-//   - register/unregister 无缓冲，连接/断开是低频操作
-func NewHub() *Hub {
-	return &Hub{
+// NewRoom创建一个新房间
+// roomID是房间标识 由上层调用者传入(从URL参数解析)
+func NewRoom(roomID string) *Room {
+	return &Room{
+		ID:         roomID,
 		clients:    make(map[*Client]bool),
 		broadcast:  make(chan []byte, 256),
 		register:   make(chan *Client),
@@ -42,43 +32,80 @@ func NewHub() *Hub {
 	}
 }
 
-// Run 启动事件循环，应作为 goroutine 运行：
-//
-//	go hub.Run()
-//
-// 三种事件：
-//  1. register   → 加入 clients map
-//  2. unregister → 从 map 删除，关闭该客户端的 send channel
-//  3. broadcast  → 给所有客户端发送消息（发不出的踢掉）
-func (h *Hub) Run() {
+func (r *Room) Run() {
 	for {
 		select {
-		case client := <-h.register:
-			h.clients[client] = true
-
-		case client := <-h.unregister:
-			if _, ok := h.clients[client]; ok {
-				delete(h.clients, client)
-				close(client.send) // 通知 writePump 退出
+		case client := <-r.register:
+			r.clients[client] = true
+		case client := <-r.unregister:
+			if _, ok := r.clients[client]; ok {
+				delete(r.clients, client)
+				close(client.send)
 			}
-
-		case msg := <-h.broadcast:
-			for client := range h.clients {
+		case msg := <-r.broadcast:
+			for client := range r.clients {
 				select {
 				case client.send <- msg:
 				default:
-					// 客户端发送缓冲区满了 → 太慢或已断开
-					// 踢掉它，避免阻塞广播循环
+					//客户端缓冲区满了, 踢掉
 					close(client.send)
-					delete(h.clients, client)
+					delete(r.clients, client)
 				}
 			}
 		}
 	}
 }
 
-// Broadcast 向所有已连接的客户端发送消息。
-// 任何 goroutine 都可安全调用。
-func (h *Hub) Broadcast(data []byte) {
-	h.broadcast <- data
+// Broadcast 向房间内所有客户端广播消息。
+// 公开方法，供 handler 层调用。
+func (r *Room) Broadcast(msg []byte) {
+	r.broadcast <- msg
+}
+
+// Hub是一个"房间管理器"
+// 不直接持有客户端,而是持有map[string]*Room
+type Hub struct {
+	rooms map[string]*Room
+	mu    sync.RWMutex //保护rooms map的并发访问
+}
+
+func NewHub() *Hub {
+	return &Hub{
+		rooms: make(map[string]*Room),
+	}
+}
+
+func (h *Hub) GetOrCreateRoom(roomID string) *Room {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if room, ok := h.rooms[roomID]; ok {
+		return room
+	}
+
+	//房间不存在, 新建并且启动它的Run goroutine
+	room := NewRoom(roomID)
+	go room.Run()
+	h.rooms[roomID] = room
+	return room
+}
+
+// RemoveRoom 安全地移除一个空房间（清理用）。
+func (h *Hub) RemoveRoom(roomID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.rooms, roomID)
+}
+
+// ActiveRooms 返回当前所有活跃房间的 ID 列表。
+// 将来直播主页要用。
+func (h *Hub) ActiveRooms() []string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	ids := make([]string, 0, len(h.rooms))
+	for id := range h.rooms {
+		ids = append(ids, id)
+	}
+	return ids
 }

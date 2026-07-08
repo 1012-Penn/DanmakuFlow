@@ -18,3 +18,10 @@ Thumbs.db
 
 # Environment
 .env
+
+# Hugo build artifacts
+.hugo_build.lock
+public/
+
+# Claude local config
+.claude/settings.local.json

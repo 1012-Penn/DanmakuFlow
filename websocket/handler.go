@@ -1,28 +1,44 @@
 package websocket
 
 import (
+	"net/http"
+
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 )
 
-// upgrader 是全局的 HTTP→WebSocket 升级器。
-// 作为配置对象，整个程序生命周期只需一个实例。
-var upgrader = websocket.Upgrader{}
+// upgrader 负责把 HTTP 连接升级到 WebSocket。
+// 留空 CheckOrigin 表示允许所有来源（开发阶段方便测试）。
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool {
+		return true // 开发阶段允许所有来源
+	},
+}
 
 // ServeWs 处理 WebSocket 握手请求。
-// 流程：升级 HTTP → 创建 Client → 注册到 Hub → 启动读写 goroutine。
+// 流程：解析房间号 → Upgrade HTTP → 创建 Client → 注册到 Room → 启动读写 goroutine。
 func ServeWs(hub *Hub, c *gin.Context) {
-	// Upgrade 内部验证 Upgrade 头，返回 101 Switching Protocols
-	// 第三个参数传 nil，不需要额外响应头
+	// 从 URL 查询参数取房间号，例如 ws://localhost:8080/ws?room=abc
+	roomID := c.DefaultQuery("room", "")
+	if roomID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "room parameter is required"})
+		return
+	}
+
+	// 升级 HTTP → WebSocket
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		return
 	}
 
-	client := NewClient(hub, conn)
-	client.hub.register <- client
+	// 找到或创建房间，然后注册客户端
+	room := hub.GetOrCreateRoom(roomID)
+	client := NewClient(hub, room, conn)
 
-	// 每个客户端独立 goroutine，互不阻塞
+	// 注册到房间（通过 channel 发送，不直接操作 map）
+	room.register <- client
+
+	// 启动读写 goroutine
 	go client.writePump()
 	go client.readPump()
 }

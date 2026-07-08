@@ -32,6 +32,7 @@ func (h *DanmakuHandler) Create(c *gin.Context) {
 	var req struct {
 		Content  string `json:"content"  binding:"required"`
 		UserID   string `json:"user_id"  binding:"required"`
+		RoomID   string `json:"room_id"  binding:"required"`
 		Color    string `json:"color"`
 		Position string `json:"position"`
 	}
@@ -65,9 +66,9 @@ func (h *DanmakuHandler) Create(c *gin.Context) {
 
 	h.store.Add(dm)
 
-	// 通过 WebSocket 广播给所有在线客户端
+	// 通过 WebSocket 广播给指定房间的在线客户端
 	data, _ := json.Marshal(dm)
-	h.hub.Broadcast(data)
+	h.hub.GetOrCreateRoom(req.RoomID).Broadcast(data)
 
 	c.JSON(http.StatusCreated, dm)
 }
