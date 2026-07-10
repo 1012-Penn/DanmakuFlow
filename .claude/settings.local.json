@@ -26,7 +26,13 @@
       "Bash(curl -s -X POST http://localhost:8080/api/danmaku -H \"Content-Type: application/json\" -d '{\"content\":\"hello\",\"user_id\":\"u1\",\"room_id\":\"abc\"}')",
       "Bash(curl -s -X POST http://localhost:8080/api/danmaku -H \"Content-Type: application/json\" -d '{\"content\":\"hello\",\"user_id\":\"u1\"}')",
       "Bash(curl -s http://localhost:8080/api/danmaku)",
-      "Bash(python3 -m json.tool)"
+      "Bash(python3 -m json.tool)",
+      "Read(//mnt/c/Users/1/Documents/Obsidian Vault/danmaku/**)",
+      "Read(//mnt/c/Users/1/Documents/Obsidian Vault/danmaku/docs/**)",
+      "Read(//root/.claude/**)",
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(curl -s \"http://localhost:8080/api/danmaku?room=abc\")",
+      "Bash(go test *)"
     ]
   }
 }

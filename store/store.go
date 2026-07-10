@@ -11,6 +11,7 @@ import (
 type Store interface {
 	Add(danmaku model.Danmaku)
 	List(limit int) []model.Danmaku
+	ListByRoom(roomID string, limit int) []model.Danmaku
 }
 
 // MemoryStore 使用内存切片存储弹幕。
@@ -18,6 +19,26 @@ type Store interface {
 type MemoryStore struct {
 	mu       sync.RWMutex
 	danmakus []model.Danmaku
+}
+
+// ListByRoom 返回指定房间最近 limit 条弹幕。
+// 从后往前遍历，找到 roomID 匹配的弹幕，凑够 limit 条即停。
+func (s *MemoryStore) ListByRoom(roomID string, limit int) []model.Danmaku {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	result := make([]model.Danmaku, 0, limit)
+	for i := len(s.danmakus) - 1; i >= 0 && len(result) < limit; i-- {
+		if s.danmakus[i].RoomID == roomID {
+			result = append(result, s.danmakus[i])
+		}
+	}
+
+	// 现在是倒序的（最新的在前），翻转一下变成时间正序
+	for i, j := 0, len(result)-1; i < j; i, j = i+1, j-1 {
+		result[i], result[j] = result[j], result[i]
+	}
+	return result
 }
 
 // New 创建一个 MemoryStore 实例。

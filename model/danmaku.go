@@ -11,5 +11,6 @@ type Danmaku struct {
 	Color     string    `json:"color"`     // 十六进制颜色，如 "#ffffff"
 	Position  string    `json:"position"`  // 显示位置：顶部/中间/底部
 	Timestamp time.Time `json:"timestamp"` // 序列化为 RFC 3339 格式
+	RoomID    string    `json:"room_id"`
 	UserID    string    `json:"user_id"`
 }

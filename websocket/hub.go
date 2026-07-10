@@ -2,6 +2,7 @@ package websocket
 
 import (
 	"sync"
+	"sync/atomic"
 )
 
 // Hub 是房间管理器，持有 map[string]*Room。
@@ -18,13 +19,16 @@ type Room struct {
 	broadcast  chan []byte
 	register   chan *Client
 	unregister chan *Client
+	hub        *Hub         // 所属 Hub，用于空房间时通知清理
+	count      atomic.Int64 // 在线人数，原子操作支持外部安全读取
 }
 
 // NewRoom创建一个新房间
 // roomID是房间标识 由上层调用者传入(从URL参数解析)
-func NewRoom(roomID string) *Room {
+func NewRoom(roomID string, hub *Hub) *Room {
 	return &Room{
 		ID:         roomID,
+		hub:        hub,
 		clients:    make(map[*Client]bool),
 		broadcast:  make(chan []byte, 256),
 		register:   make(chan *Client),
@@ -32,15 +36,26 @@ func NewRoom(roomID string) *Room {
 	}
 }
 
+// OnlineCount 返回当前房间在线人数。
+func (r *Room) OnlineCount() int {
+	return int(r.count.Load())
+}
+
 func (r *Room) Run() {
 	for {
 		select {
 		case client := <-r.register:
 			r.clients[client] = true
+			r.count.Add(1)
 		case client := <-r.unregister:
 			if _, ok := r.clients[client]; ok {
 				delete(r.clients, client)
+				r.count.Add(-1)
 				close(client.send)
+				// 最后一个客户端离开 → 从 Hub 中移除房间
+				if len(r.clients) == 0 {
+					r.hub.RemoveRoom(r.ID)
+				}
 			}
 		case msg := <-r.broadcast:
 			for client := range r.clients {
@@ -50,7 +65,12 @@ func (r *Room) Run() {
 					//客户端缓冲区满了, 踢掉
 					close(client.send)
 					delete(r.clients, client)
+					r.count.Add(-1)
 				}
+			}
+			// 广播后房间空了 → 从 Hub 中移除
+			if len(r.clients) == 0 {
+				r.hub.RemoveRoom(r.ID)
 			}
 		}
 	}
@@ -84,7 +104,7 @@ func (h *Hub) GetOrCreateRoom(roomID string) *Room {
 	}
 
 	//房间不存在, 新建并且启动它的Run goroutine
-	room := NewRoom(roomID)
+	room := NewRoom(roomID, h)
 	go room.Run()
 	h.rooms[roomID] = room
 	return room
