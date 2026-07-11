@@ -2,6 +2,7 @@ package websocket
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -25,11 +26,14 @@ const (
 // Config 存放 WebSocket 层所有可配置参数。
 // 由 config 包提供值，也可手动构造。
 type Config struct {
-	WriteWaitSeconds    int // 写超时（秒）
-	PongWaitSeconds     int // 等 Pong 超时（秒）
-	MaxMessageSize      int // 单条消息最大字节数
-	BroadcastBufferSize int // Room.broadcast 通道缓冲区大小
-	SendBufferSize      int // Client.send 通道缓冲区大小
+	WriteWaitSeconds    int      // 写超时（秒）
+	PongWaitSeconds     int      // 等 Pong 超时（秒）
+	MaxMessageSize      int      // 单条消息最大字节数
+	BroadcastBufferSize int      // Room.broadcast 通道缓冲区大小
+	SendBufferSize      int      // Client.send 通道缓冲区大小
+	MaxConnPerRoom      int      // 每房间最大连接数，0=不限制
+	MaxConnPerIP        int      // 每 IP 最大连接数，0=不限制
+	AllowedOrigins      []string // 允许的 Origin，空=不校验
 }
 
 // Hub 是房间管理器，持有 map[string]*Room。
@@ -159,6 +163,9 @@ type Hub struct {
 	redisClient *redisclient.Client // Redis 跨实例广播客户端，nil = 不使用
 	redisCancel context.CancelFunc  // 用于停止 redisSubscribeLoop goroutine
 	wg          sync.WaitGroup      // 等待后台 goroutine 退出（Redis 订阅）
+
+	connCounter map[string]int64 // 每 IP 连接数
+	counterMu   sync.Mutex       // 保护 connCounter
 }
 
 // NewHub 使用默认配置创建 Hub。
@@ -180,6 +187,7 @@ func NewHubWithConfig(cfg Config, redisClient *redisclient.Client) *Hub {
 		rooms:       make(map[string]*Room),
 		cfg:         cfg,
 		redisClient: redisClient,
+		connCounter: make(map[string]int64),
 	}
 
 	// 如果有 Redis 客户端，启动跨实例广播订阅循环
@@ -224,7 +232,11 @@ func (h *Hub) redisSubscribeLoop(ctx context.Context) {
 	ch := h.redisClient.Subscribe(ctx)
 	defer h.wg.Done()
 	for msg := range ch {
-		room := h.GetOrCreateRoom(msg.RoomID)
+		// 只广播到本机已有客户端的房间，不存在的房间不创建
+		room := h.GetRoom(msg.RoomID)
+		if room == nil {
+			continue
+		}
 		room.Broadcast(msg.Data)
 	}
 	slog.Info("Redis 订阅循环已退出")
@@ -251,6 +263,54 @@ func (h *Hub) maxMessageSize() int64 {
 
 func (h *Hub) sendBufferSize() int {
 	return h.cfg.SendBufferSize
+}
+
+// connInc 增加某 IP 的连接计数，返回增加后的值。用于每 IP 连接数限制。
+func (h *Hub) connInc(ip string) int64 {
+	h.counterMu.Lock()
+	defer h.counterMu.Unlock()
+	h.connCounter[ip]++
+	return h.connCounter[ip]
+}
+
+// connDec 减少某 IP 的连接计数。
+func (h *Hub) connDec(ip string) {
+	h.counterMu.Lock()
+	defer h.counterMu.Unlock()
+	h.connCounter[ip]--
+	if h.connCounter[ip] <= 0 {
+		delete(h.connCounter, ip)
+	}
+}
+
+// CheckConnLimits 检查连接是否超过限制。
+// 返回 (允许连接?, 拒绝原因)。
+func (h *Hub) CheckConnLimits(ip string, roomID string) (bool, string) {
+	if h.cfg.MaxConnPerIP > 0 {
+		h.counterMu.Lock()
+		cur := h.connCounter[ip]
+		h.counterMu.Unlock()
+		if cur >= int64(h.cfg.MaxConnPerIP) {
+			return false, fmt.Sprintf("每 IP 连接数限制 %d", h.cfg.MaxConnPerIP)
+		}
+	}
+
+	if h.cfg.MaxConnPerRoom > 0 {
+		room := h.GetRoom(roomID)
+		if room != nil && room.OnlineCount() >= h.cfg.MaxConnPerRoom {
+			return false, fmt.Sprintf("房间连接数限制 %d", h.cfg.MaxConnPerRoom)
+		}
+	}
+
+	return true, ""
+}
+
+// GetRoom 返回指定房间的指针，房间不存在时返回 nil。
+// 只读查询，不会创建新房间。用于 Redis 订阅循环——不存在的房间不广播。
+func (h *Hub) GetRoom(roomID string) *Room {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.rooms[roomID]
 }
 
 func (h *Hub) GetOrCreateRoom(roomID string) *Room {

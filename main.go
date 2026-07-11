@@ -41,13 +41,17 @@ func main() {
 		}
 		redisClient = redisclient.New(cfg.Redis.Addr, instanceID)
 		if err := redisClient.Ping(context.Background()); err != nil {
-			slog.Error("Redis 连接失败", "addr", cfg.Redis.Addr, "error", err)
-			os.Exit(1)
+			slog.Warn("Redis 连接失败，降级为纯本地广播",
+				"addr", cfg.Redis.Addr,
+				"error", err,
+			)
+			redisClient = nil // 降级：跳过 Redis，纯本地广播
+		} else {
+			slog.Info("已连接 Redis",
+				"addr", cfg.Redis.Addr,
+				"instance_id", instanceID,
+			)
 		}
-		slog.Info("已连接 Redis",
-			"addr", cfg.Redis.Addr,
-			"instance_id", instanceID,
-		)
 	}
 
 	// 创建 Hub（房间管理器），传入 WebSocket 配置和可选的 Redis 客户端
@@ -57,6 +61,9 @@ func main() {
 		MaxMessageSize:      cfg.WebSocket.MaxMessageSize,
 		BroadcastBufferSize: cfg.WebSocket.BroadcastBufferSize,
 		SendBufferSize:      cfg.WebSocket.SendBufferSize,
+		MaxConnPerRoom:      cfg.WebSocket.MaxConnPerRoom,
+		MaxConnPerIP:        cfg.WebSocket.MaxConnPerIP,
+		AllowedOrigins:      cfg.WebSocket.AllowedOrigins,
 	}, redisClient)
 
 	// 关闭 Gin 的调试日志（我们用自己的日志代替）
@@ -80,7 +87,7 @@ func main() {
 	}
 
 	// 组装依赖链
-	svc := service.NewDanmakuService(s, hub, cfg.Store.AsyncBufferSize)
+	svc := service.NewDanmakuService(s, hub, cfg.Store.AsyncBufferSize, cfg.RateLimit.MessagesPerSec)
 	h := handler.New(svc, hub, cfg.Store.DefaultListLimit)
 
 	// 注册所有路由
@@ -122,15 +129,17 @@ func main() {
 		slog.Error("HTTP 服务器关闭超时", "error", err)
 	}
 
-	// 2. 关闭 WebSocket 连接（给所有客户端发关闭帧）
-	hub.Shutdown()
-
-	// 3. 排空异步写库通道，等待 consumer 将剩余弹幕写入存储
+	// 2. 排空异步写库通道，等待 consumer 将剩余弹幕写入存储
+	//    必须在关 Hub 之前做，否则 in-flight 的 createAndBroadcast
+	//    可能会在 Hub 关闭后继续调 BroadcastToRoom
 	drainCtx, drainCancel := context.WithTimeout(context.Background(), 3*time.Second)
 	if err := svc.Shutdown(drainCtx); err != nil {
 		slog.Warn("异步写入排空超时，部分弹幕可能未入库", "error", err)
 	}
 	drainCancel()
+
+	// 3. 关闭 WebSocket 连接（给所有客户端发关闭帧）
+	hub.Shutdown()
 
 	// 4. 关闭 Redis 连接（此时已停止订阅，不会再有跨实例广播）
 	if redisClient != nil {

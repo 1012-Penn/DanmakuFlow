@@ -19,36 +19,41 @@ type MessageHandler interface {
 //   - readPump:  从 conn 读消息 → 交给 MessageHandler 处理（存库 + 广播）
 //   - writePump: 从 send channel 取消息 → 写到 conn
 type Client struct {
-	hub     *Hub            // 所属 Hub（房间管理器）
-	room    *Room           // 所属房间
-	conn    *websocket.Conn // WebSocket 连接
-	send    chan []byte     // 待发送消息缓冲区
-	handler MessageHandler  // 消息处理器（由 service 层实现）
+	hub        *Hub            // 所属 Hub（房间管理器）
+	room       *Room           // 所属房间
+	conn       *websocket.Conn // WebSocket 连接
+	send       chan []byte     // 待发送消息缓冲区
+	handler    MessageHandler  // 消息处理器（由 service 层实现）
+	remoteAddr string          // 客户端 IP（用于连接数计数和日志）
 }
 
 // NewClient 创建一个 Client。
 func NewClient(hub *Hub, room *Room, conn *websocket.Conn, handler MessageHandler) *Client {
+	// 从 RemoteAddr 提取 IP（格式 "ip:port"）
+	remoteAddr := conn.RemoteAddr().String()
 	return &Client{
-		hub:     hub,
-		room:    room,
-		conn:    conn,
-		send:    make(chan []byte, hub.sendBufferSize()),
-		handler: handler,
+		hub:        hub,
+		room:       room,
+		conn:       conn,
+		send:       make(chan []byte, hub.sendBufferSize()),
+		handler:    handler,
+		remoteAddr: remoteAddr,
 	}
 }
 
 // readPump 从 WebSocket 连接读消息 → 交给 MessageHandler 统一处理。
 //
 // 这是每个连接唯一一个读 goroutine：只调 conn.ReadMessage()。
-// 断开或出错时执行 defer 清理：通知 Room 注销自己、关闭 TCP 连接。
+// 断开或出错时执行 defer 清理：通知 Room 注销自己、释放 IP 计数、关闭 TCP 连接。
 // 超时参数和消息大小限制均从 Hub 配置读取。
 func (c *Client) readPump() {
 	defer func() {
 		slog.Debug("WS 客户端断开",
 			"room_id", c.room.ID,
-			"remote", c.conn.RemoteAddr().String(),
+			"remote", c.remoteAddr,
 		)
 		c.room.unregister <- c
+		c.hub.connDec(c.remoteAddr) // 释放 IP 连接计数
 		c.conn.Close()
 	}()
 

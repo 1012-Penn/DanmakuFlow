@@ -28,7 +28,7 @@ func setupTest(t *testing.T) (*httptest.Server, *danmakuws.Hub) {
 
 	hub := danmakuws.NewHub()
 	s := store.New()
-	svc := service.NewDanmakuService(s, hub, 0)
+	svc := service.NewDanmakuService(s, hub, 0, 0)
 	h := handler.New(svc, hub, 20)
 
 	h.RegisterRoutes(r)

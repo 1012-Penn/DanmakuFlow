@@ -35,6 +35,58 @@ type CreateDanmakuRequest struct {
 	FontSize int    `json:"font_size"`
 }
 
+// rateLimiter 基于内存的每用户频率限制。
+// 记录每个用户最后一次发消息的时间，如果间隔小于阈值则拒绝。
+type rateLimiter struct {
+	mu       sync.Mutex
+	lastTime map[string]time.Time
+	interval time.Duration // 最小发送间隔（0 = 不限制）
+}
+
+func newRateLimiter(msgsPerSec float64) *rateLimiter {
+	var interval time.Duration
+	if msgsPerSec > 0 {
+		interval = time.Duration(float64(time.Second) / msgsPerSec)
+	}
+	return &rateLimiter{
+		lastTime: make(map[string]time.Time),
+		interval: interval,
+	}
+}
+
+// Allow 检查 userID 是否允许发送。允许返回 true，拒绝返回 false。
+func (rl *rateLimiter) Allow(userID string) bool {
+	if rl.interval <= 0 {
+		return true // 不限制
+	}
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	last, ok := rl.lastTime[userID]
+	now := time.Now()
+	if ok && now.Sub(last) < rl.interval {
+		return false // 发送太快
+	}
+	rl.lastTime[userID] = now
+
+	// 定期清理（每 1000 次检查清理一次，防止 map 无限膨胀）
+	if len(rl.lastTime) > 1000 {
+		go rl.cleanup()
+	}
+	return true
+}
+
+// cleanup 清理超过 2 倍间隔未活动的用户记录。
+func (rl *rateLimiter) cleanup() {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	threshold := time.Now().Add(-rl.interval * 2)
+	for uid, t := range rl.lastTime {
+		if t.Before(threshold) {
+			delete(rl.lastTime, uid)
+		}
+	}
+}
+
 // DanmakuService 是弹幕的业务层。
 // 职责：创建弹幕 → 存库 + 广播，保证两者一定同时发生。
 // 无论消息来自 HTTP 还是 WebSocket，都经过这里统一处理。
@@ -48,15 +100,18 @@ type DanmakuService struct {
 	danmakuChan chan model.Danmaku // 异步写库通道，nil = 同步写
 	wg          sync.WaitGroup     // 等待 consumer 将剩余消息写入存储
 	closed      atomic.Bool        // 标记是否已关闭（防止重复关闭 danmakuChan）
+	rateLimiter *rateLimiter       // 频率限制器，nil = 不限制
 }
 
 // NewDanmakuService 创建一个 DanmakuService。
 // asyncBufferSize > 0 时启用异步写库；= 0 时为同步写（测试场景用）。
-func NewDanmakuService(s store.Store, hub *websocket.Hub, asyncBufferSize int) *DanmakuService {
+// msgsPerSec > 0 时启用每用户频率限制。
+func NewDanmakuService(s store.Store, hub *websocket.Hub, asyncBufferSize int, msgsPerSec float64) *DanmakuService {
 	svc := &DanmakuService{
 		store:       s,
 		hub:         hub,
 		danmakuChan: nil,
+		rateLimiter: newRateLimiter(msgsPerSec),
 	}
 	if asyncBufferSize > 0 {
 		svc.danmakuChan = make(chan model.Danmaku, asyncBufferSize)
@@ -185,6 +240,11 @@ func (s *DanmakuService) createAndBroadcast(req CreateDanmakuRequest) (model.Dan
 	}
 	if s.closed.Load() {
 		return model.Danmaku{}, errors.New("服务已关闭，不再接收新弹幕")
+	}
+
+	// 频率限制
+	if s.rateLimiter != nil && !s.rateLimiter.Allow(req.UserID) {
+		return model.Danmaku{}, errors.New("发送频率过快，请稍后再试")
 	}
 
 	color := req.Color

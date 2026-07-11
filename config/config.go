@@ -20,6 +20,7 @@ type Config struct {
 	Store     StoreConfig     `yaml:"store"`
 	Log       LogConfig       `yaml:"log"`
 	Redis     RedisConfig     `yaml:"redis"`
+	RateLimit RateLimitConfig `yaml:"rate_limit"`
 }
 
 // ServerConfig 存放 HTTP 服务器相关配置。
@@ -29,11 +30,19 @@ type ServerConfig struct {
 
 // WebSocketConfig 存放 WebSocket 连接参数。
 type WebSocketConfig struct {
-	WriteWaitSeconds    int `yaml:"write_wait_seconds"`    // 写超时（秒）
-	PongWaitSeconds     int `yaml:"pong_wait_seconds"`     // 等 Pong 超时（秒）
-	MaxMessageSize      int `yaml:"max_message_size"`      // 单条消息最大字节数
-	BroadcastBufferSize int `yaml:"broadcast_buffer_size"` // Room.broadcast 通道缓冲区大小
-	SendBufferSize      int `yaml:"send_buffer_size"`      // Client.send 通道缓冲区大小
+	WriteWaitSeconds    int      `yaml:"write_wait_seconds"`    // 写超时（秒）
+	PongWaitSeconds     int      `yaml:"pong_wait_seconds"`     // 等 Pong 超时（秒）
+	MaxMessageSize      int      `yaml:"max_message_size"`      // 单条消息最大字节数
+	BroadcastBufferSize int      `yaml:"broadcast_buffer_size"` // Room.broadcast 通道缓冲区大小
+	SendBufferSize      int      `yaml:"send_buffer_size"`      // Client.send 通道缓冲区大小
+	MaxConnPerRoom      int      `yaml:"max_conn_per_room"`     // 每房间最大连接数，0=不限制
+	MaxConnPerIP        int      `yaml:"max_conn_per_ip"`       // 每 IP 最大连接数，0=不限制
+	AllowedOrigins      []string `yaml:"allowed_origins"`       // 允许的 Origin，空=不校验
+}
+
+// RateLimitConfig 存放频率限制相关配置。
+type RateLimitConfig struct {
+	MessagesPerSec float64 `yaml:"messages_per_sec"` // 每用户每秒可发送弹幕数，0=不限制
 }
 
 // LogConfig 存放日志相关配置。
@@ -105,6 +114,9 @@ func Default() *Config {
 			MaxMessageSize:      512,
 			BroadcastBufferSize: 256,
 			SendBufferSize:      256,
+			MaxConnPerRoom:      0, // 0 = 不限制
+			MaxConnPerIP:        0, // 0 = 不限制
+			AllowedOrigins:      nil,
 		},
 		Store: StoreConfig{
 			DefaultListLimit: 20,
@@ -118,6 +130,9 @@ func Default() *Config {
 		Redis: RedisConfig{
 			Addr:       "", // 空 = 不使用 Redis
 			InstanceID: "",
+		},
+		RateLimit: RateLimitConfig{
+			MessagesPerSec: 0, // 0 = 不限制
 		},
 	}
 }
