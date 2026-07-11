@@ -60,6 +60,7 @@ func NewDanmakuService(s store.Store, hub *websocket.Hub, asyncBufferSize int) *
 	}
 	if asyncBufferSize > 0 {
 		svc.danmakuChan = make(chan model.Danmaku, asyncBufferSize)
+		svc.wg.Add(1) // 启动前 Add，防止 Shutdown 的 Wait 先执行
 		go svc.danmakuConsumer()
 	}
 	return svc
@@ -69,7 +70,6 @@ func NewDanmakuService(s store.Store, hub *websocket.Hub, asyncBufferSize int) *
 // 在独立的 goroutine 中运行，不阻塞主流程。
 // channel 关闭后 for-range 退出，标记 WaitGroup 完成。
 func (s *DanmakuService) danmakuConsumer() {
-	s.wg.Add(1)
 	defer s.wg.Done()
 	for dm := range s.danmakuChan {
 		s.store.Add(dm)

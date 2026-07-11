@@ -94,27 +94,29 @@ func main() {
 	sig := <-quit
 	slog.Info("收到退出信号，开始优雅关闭...", "signal", sig.String())
 
-	// 1. 关闭 WebSocket 连接（给所有客户端发关闭帧）
+	// 1. 关闭 HTTP 服务器：停止监听，不再接受新请求
+	//    必须先做，否则关闭 WS 时可能还有新 WS 握手进来
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer shutdownCancel()
+
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		slog.Error("HTTP 服务器关闭超时", "error", err)
+	}
+
+	// 2. 关闭 WebSocket 连接（给所有客户端发关闭帧）
 	hub.Shutdown()
 
-	// 2. 排空异步写库通道，等待 consumer 将剩余弹幕写入存储
-	drainCtx, drainCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// 3. 排空异步写库通道，等待 consumer 将剩余弹幕写入存储
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), 3*time.Second)
 	if err := svc.Shutdown(drainCtx); err != nil {
 		slog.Warn("异步写入排空超时，部分弹幕可能未入库", "error", err)
 	}
 	drainCancel()
 
-	// 3. 关闭 MySQL 数据库连接（此时确保无更多写入）
+	// 4. 关闭 MySQL 数据库连接（此时确保无更多写入）
 	if ms, ok := s.(*store.MySQLStore); ok {
 		ms.Close()
 		slog.Info("MySQL 连接已关闭")
-	}
-
-	// 4. 关闭 HTTP 服务器（最多等待 5 秒完成当前请求）
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
-		slog.Error("HTTP 服务器关闭超时", "error", err)
 	}
 
 	slog.Info("服务器已安全关闭")
