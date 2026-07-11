@@ -1,16 +1,22 @@
 # DanmakuFlow 配置文件示例
 # 复制为 config.yaml 并按需修改：
 #   cp config.yaml.example config.yaml
+#
+# 所有字段均有内置默认值，未配置时可直接运行。
 
 server:
   port: 8080
 
 websocket:
-  write_wait_seconds: 10
-  pong_wait_seconds: 60
-  max_message_size: 512
-  broadcast_buffer_size: 256
-  send_buffer_size: 256
+  write_wait_seconds: 10       # 写超时（秒）
+  pong_wait_seconds: 60        # Pong 超时（秒）
+  max_message_size: 512        # 单条消息最大字节数
+  broadcast_buffer_size: 256   # Room.broadcast 通道缓冲区大小
+  send_buffer_size: 256        # Client.send 通道缓冲区大小
+  # 以下限制 0=不限制
+  max_conn_per_room: 0         # 每房间最大连接数
+  max_conn_per_ip: 0           # 每 IP 最大连接数
+  allowed_origins: []          # 允许的 Origin，空=不校验
 
 log:
   # debug / info / warn / error
@@ -24,3 +30,13 @@ store:
   dsn: "user:password@tcp(127.0.0.1:3306)/danmaku?charset=utf8mb4&parseTime=True&loc=Local"
   # 异步写入通道缓冲区大小（0 = 同步写）
   async_buffer_size: 1024
+
+redis:
+  # Redis 地址，留空 = 不使用 Redis（回退纯内存广播）
+  addr: "localhost:6379"
+  # 实例标识，用于跨实例消息去重。留空 = 自动获取主机名
+  instance_id: ""
+
+rate_limit:
+  # 每用户每秒可发送弹幕数，0=不限制
+  messages_per_sec: 0
