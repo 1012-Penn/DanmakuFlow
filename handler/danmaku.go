@@ -27,25 +27,32 @@ func New(svc *service.DanmakuService, hub *websocket.Hub, defaultListLimit int) 
 	}
 }
 
-// Create 处理 POST /api/danmaku
-// 流程：绑定 JSON → 交给 Service 创建（存库 + 广播）→ 返 201
+// Create 处理 POST /api/room/:room_id/danmaku
+// 流程：从 URL 取 room_id → 绑定 JSON → 交给 Service 创建 → 返 201
 func (h *DanmakuHandler) Create(c *gin.Context) {
+	roomID := c.Param("room_id")
+
 	var req service.CreateDanmakuRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	req.RoomID = roomID
 
-	dm, _ := h.svc.CreateDanmaku(req)
+	dm, err := h.svc.CreateDanmaku(req)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 	c.JSON(http.StatusCreated, dm)
 }
 
-// List 处理 GET /api/danmaku?room=xxx
-// 返回指定房间最近 20 条弹幕。
+// List 处理 GET /api/room/:room_id/danmaku
+// 返回指定房间最近 N 条弹幕（N 由配置决定）。
 func (h *DanmakuHandler) List(c *gin.Context) {
-	roomID := c.Query("room")
+	roomID := c.Param("room_id")
 	if roomID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "room query parameter is required"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "room_id is required"})
 		return
 	}
 
@@ -54,10 +61,15 @@ func (h *DanmakuHandler) List(c *gin.Context) {
 }
 
 // RegisterRoutes 注册所有路由。
+// 对外契约：
+//
+//	POST /api/room/:room_id/danmaku — 发弹幕（body 传 content/user_id 等）
+//	GET  /api/room/:room_id/danmaku — 查弹幕历史
+//	GET  /ws?room_id=xxx            — WebSocket 连接
 func (h *DanmakuHandler) RegisterRoutes(r *gin.Engine) {
-	api := r.Group("/api")
-	api.POST("/danmaku", h.Create)
-	api.GET("/danmaku", h.List)
+	room := r.Group("/api/room/:room_id")
+	room.POST("/danmaku", h.Create)
+	room.GET("/danmaku", h.List)
 
 	// WebSocket 握手路由，把 svc 作为 MessageHandler 传进去
 	r.GET("/ws", func(c *gin.Context) {

@@ -19,8 +19,8 @@ var upgrader = websocket.Upgrader{
 // 流程：解析房间号 → Upgrade HTTP → 创建 Client → 注册到 Room → 启动读写 goroutine。
 // handler 参数是 MessageHandler，由 service 层实现，用于统一处理收到的消息。
 func ServeWs(hub *Hub, handler MessageHandler, c *gin.Context) {
-	// 从 URL 查询参数取房间号，例如 ws://localhost:8080/ws?room=abc
-	roomID := c.DefaultQuery("room", "")
+	// 从 URL 查询参数取房间号，例如 ws://localhost:8080/ws?room_id=liveroom_001
+	roomID := c.DefaultQuery("room_id", "")
 	if roomID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "room parameter is required"})
 		return

@@ -44,7 +44,7 @@ func setupTest(t *testing.T) (*httptest.Server, *danmakuws.Hub) {
 func wsConnect(t *testing.T, server *httptest.Server, roomID string) *websocket.Conn {
 	t.Helper()
 
-	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws?room=" + roomID
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws?room_id=" + roomID
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		t.Fatalf("failed to connect to %s: %v", wsURL, err)
@@ -57,8 +57,8 @@ func wsConnect(t *testing.T, server *httptest.Server, roomID string) *websocket.
 func TestCreateDanmaku(t *testing.T) {
 	server, _ := setupTest(t)
 
-	body := `{"content":"test message","user_id":"u1","room_id":"abc"}`
-	resp, err := http.Post(server.URL+"/api/danmaku", "application/json", strings.NewReader(body))
+	body := `{"content":"test message","user_id":"u1"}`
+	resp, err := http.Post(server.URL+"/api/room/abc/danmaku", "application/json", strings.NewReader(body))
 	assert.NoError(t, err)
 	assert.Equal(t, http.StatusCreated, resp.StatusCode)
 
@@ -77,15 +77,15 @@ func TestListByRoom(t *testing.T) {
 	server, _ := setupTest(t)
 
 	// 在房间 abc 发两条，def 发一条
-	http.Post(server.URL+"/api/danmaku", "application/json",
-		strings.NewReader(`{"content":"msg1","user_id":"u1","room_id":"abc"}`))
-	http.Post(server.URL+"/api/danmaku", "application/json",
-		strings.NewReader(`{"content":"msg2","user_id":"u1","room_id":"abc"}`))
-	http.Post(server.URL+"/api/danmaku", "application/json",
-		strings.NewReader(`{"content":"msg3","user_id":"u2","room_id":"def"}`))
+	http.Post(server.URL+"/api/room/abc/danmaku", "application/json",
+		strings.NewReader(`{"content":"msg1","user_id":"u1"}`))
+	http.Post(server.URL+"/api/room/abc/danmaku", "application/json",
+		strings.NewReader(`{"content":"msg2","user_id":"u1"}`))
+	http.Post(server.URL+"/api/room/def/danmaku", "application/json",
+		strings.NewReader(`{"content":"msg3","user_id":"u2"}`))
 
 	// 查房间 abc
-	resp, _ := http.Get(server.URL + "/api/danmaku?room=abc")
+	resp, _ := http.Get(server.URL + "/api/room/abc/danmaku")
 	var list []map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&list)
 	resp.Body.Close()

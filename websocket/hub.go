@@ -89,8 +89,8 @@ func (r *Room) Run() {
 					"online", online,
 				)
 				if online == 0 {
-					r.hub.RemoveRoom(r.ID)
-					slog.Info("房间已空，已清除", "room_id", r.ID)
+					r.hub.RemoveRoomIfSame(r.ID, r)
+					slog.Info("房间已空，已关闭", "room_id", r.ID)
 				}
 			}
 
@@ -110,8 +110,9 @@ func (r *Room) Run() {
 				}
 			}
 			if len(r.clients) == 0 {
-				r.hub.RemoveRoom(r.ID)
-				slog.Info("广播后房间已空，已清除", "room_id", r.ID)
+				// 广播后无人接收，关闭房间
+				r.hub.RemoveRoomIfSame(r.ID, r)
+				slog.Info("广播后房间已空，已关闭", "room_id", r.ID)
 			}
 
 		case <-r.stop:
@@ -131,9 +132,17 @@ func (r *Room) Run() {
 }
 
 // Broadcast 向房间内所有客户端广播消息。
-// 公开方法，供 handler 层调用。
+// 非阻塞实现：channel 满了直接丢弃，防止 HTTP 请求被广播拖慢。
+// 公开方法，供 handler/service 层调用。
 func (r *Room) Broadcast(msg []byte) {
-	r.broadcast <- msg
+	select {
+	case r.broadcast <- msg:
+	default:
+		slog.Warn("广播通道已满，丢弃弹幕",
+			"room_id", r.ID,
+			"buf_size", cap(r.broadcast),
+		)
+	}
 }
 
 // Hub是一个"房间管理器"
@@ -204,11 +213,17 @@ func (h *Hub) GetOrCreateRoom(roomID string) *Room {
 	return room
 }
 
-// RemoveRoom 安全地移除一个空房间（清理用）。
-func (h *Hub) RemoveRoom(roomID string) {
+// RemoveRoomIfSame 移除 roomID 对应的房间，前提是它和传入的 room 是同一个对象。
+// 防止并发场景：判断为空 → 新客户端同时创建新房间 → 误删新房间。
+// 移除后关闭 room.stop，让 Room.Run() goroutine 安全退出。
+func (h *Hub) RemoveRoomIfSame(roomID string, room *Room) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	delete(h.rooms, roomID)
+	if existing, ok := h.rooms[roomID]; ok && existing == room {
+		delete(h.rooms, roomID)
+		close(room.stop)
+		slog.Debug("房间 goroutine 已退出", "room_id", roomID)
+	}
 }
 
 // Shutdown 优雅关闭所有房间。
