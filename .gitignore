@@ -31,3 +31,4 @@ public/
 
 # Claude local config
 .claude/settings.local.json
+benchmark_results.log
