@@ -1,23 +1,10 @@
 package websocket
 
 import (
+	"log/slog"
 	"time"
 
 	"github.com/gorilla/websocket"
-)
-
-const (
-	// 写超时：10 秒内写不完就断开
-	writeWait = 10 * time.Second
-
-	// 等 Pong 的最长时间：60 秒收不到 Pong 就认为客户端死了
-	pongWait = 60 * time.Second
-
-	// Ping 发送间隔 = Pong 等待时间的 90%，留有余量
-	pingPeriod = (pongWait * 9) / 10
-
-	// 最大消息大小：512 字节，超过就断开
-	maxMessageSize = 512
 )
 
 // MessageHandler 处理从 WebSocket 收到的消息。
@@ -35,7 +22,7 @@ type Client struct {
 	hub     *Hub            // 所属 Hub（房间管理器）
 	room    *Room           // 所属房间
 	conn    *websocket.Conn // WebSocket 连接
-	send    chan []byte     // 待发送消息缓冲区，容量 256
+	send    chan []byte     // 待发送消息缓冲区
 	handler MessageHandler  // 消息处理器（由 service 层实现）
 }
 
@@ -45,7 +32,7 @@ func NewClient(hub *Hub, room *Room, conn *websocket.Conn, handler MessageHandle
 		hub:     hub,
 		room:    room,
 		conn:    conn,
-		send:    make(chan []byte, 256),
+		send:    make(chan []byte, hub.sendBufferSize()),
 		handler: handler,
 	}
 }
@@ -54,13 +41,20 @@ func NewClient(hub *Hub, room *Room, conn *websocket.Conn, handler MessageHandle
 //
 // 这是每个连接唯一一个读 goroutine：只调 conn.ReadMessage()。
 // 断开或出错时执行 defer 清理：通知 Room 注销自己、关闭 TCP 连接。
+// 超时参数和消息大小限制均从 Hub 配置读取。
 func (c *Client) readPump() {
 	defer func() {
+		slog.Debug("WS 客户端断开",
+			"room_id", c.room.ID,
+			"remote", c.conn.RemoteAddr().String(),
+		)
 		c.room.unregister <- c
 		c.conn.Close()
 	}()
 
-	c.conn.SetReadLimit(maxMessageSize)
+	pongWait := c.hub.pongWait()
+
+	c.conn.SetReadLimit(c.hub.maxMessageSize())
 	c.conn.SetReadDeadline(time.Now().Add(pongWait))
 	c.conn.SetPongHandler(func(string) error {
 		c.conn.SetReadDeadline(time.Now().Add(pongWait))
@@ -81,8 +75,10 @@ func (c *Client) readPump() {
 //
 // 同时负责定时发 Ping 保活。
 // send 被关闭时（Room unregister 时做的），自动退出循环。
+// Ping 间隔、写超时等参数均从 Hub 配置读取。
 func (c *Client) writePump() {
-	ticker := time.NewTicker(pingPeriod)
+	writeWait := c.hub.writeWait()
+	ticker := time.NewTicker(c.hub.pingPeriod())
 	defer func() {
 		ticker.Stop()
 		c.conn.Close()

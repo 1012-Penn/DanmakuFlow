@@ -7,15 +7,63 @@
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: system-ui, sans-serif; padding: 20px; background: #1a1a2e; color: #fff; }
         #room-header { font-size: 18px; color: #e94560; margin-bottom: 12px; }
+
+        /* ---- 弹幕播放区 ---- */
         #box {
-            width: 100%; height: 400px; border: 1px solid #333;
-            overflow-y: auto; padding: 12px; border-radius: 8px;
+            position: relative;
+            width: 100%; height: 400px; overflow: hidden;
+            border: 1px solid #333; border-radius: 8px;
             background: #16213e; margin-bottom: 12px;
         }
-        .item { margin: 6px 0; font-size: 16px; line-height: 1.5; }
-        #input { padding: 10px; width: calc(100% - 80px); border-radius: 6px; border: none; }
+
+        /* 所有弹幕共用的基础样式 */
+        .danmaku-item {
+            position: absolute;
+            white-space: nowrap;
+            pointer-events: none;
+        }
+
+        /* 滚动弹幕：从容器右侧外 → 左侧外 */
+        .danmaku-scroll {
+            animation: scrollRight 5s linear forwards;
+        }
+        @keyframes scrollRight {
+            from { left: 100%; }
+            to   { left: -100%; }
+        }
+
+        /* 逆向滚动：从容器左侧外 → 右侧外 */
+        .danmaku-reverse {
+            animation: scrollLeft 5s linear forwards;
+        }
+        @keyframes scrollLeft {
+            from { left: -100%; }
+            to   { left: 100%; }
+        }
+
+        /* 顶部 / 底部固定：居中出现，停留后淡出 */
+        .danmaku-top,
+        .danmaku-bottom {
+            left: 50%; transform: translateX(-50%);
+            background: rgba(0,0,0,0.5); padding: 2px 12px; border-radius: 4px;
+            animation: fadeOut 4s ease-in forwards;
+        }
+        .danmaku-top    { top: 8px; }
+        .danmaku-bottom { bottom: 8px; }
+        @keyframes fadeOut {
+            0%, 70% { opacity: 1; }
+            100%    { opacity: 0; }
+        }
+
+        /* ---- 输入区 ---- */
+        #controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+        #input { padding: 10px; flex: 1; min-width: 200px; border-radius: 6px; border: none; }
         #sendBtn { padding: 10px 20px; border-radius: 6px; border: none; background: #0f3460; color: #fff; cursor: pointer; }
         #sendBtn:hover { background: #1a5276; }
+
+        select { padding: 10px; border-radius: 6px; border: none; background: #0f3460; color: #fff; }
+        select option { background: #1a1a2e; }
+
         .status { font-size: 14px; color: #888; margin-top: 8px; }
         .error { color: #e94560; font-size: 18px; text-align: center; margin-top: 100px; }
     </style>
@@ -25,16 +73,22 @@
     <div id="room-header">📺 房间: <span id="room-name">-</span></div>
     <div id="box"></div>
 
-    <input id="input" type="text" placeholder="Type here..." />
-    <button id="sendBtn">Send</button>
+    <div id="controls">
+        <input id="input" type="text" placeholder="Type here..." />
+        <select id="typeSelect">
+            <option value="scroll">滚动</option>
+            <option value="top">顶部</option>
+            <option value="bottom">底部</option>
+            <option value="reverse">逆向</option>
+        </select>
+        <button id="sendBtn">Send</button>
+    </div>
     <div id="status" class="status">Disconnected</div>
 
     <script>
-        // 从 URL 取房间号，例如 http://localhost:8080/?room=abc
         const params = new URLSearchParams(location.search);
         const roomID = params.get('room');
 
-        // 没有房间号就报错
         if (!roomID) {
             document.body.innerHTML = '<div class="error">❌ 请通过 ?room=xxx 指定房间号<br><small>例如: http://localhost:8080/?room=abc</small></div>';
             throw new Error('room parameter required');
@@ -42,6 +96,7 @@
 
         const box = document.getElementById('box');
         const input = document.getElementById('input');
+        const typeSelect = document.getElementById('typeSelect');
         const status = document.getElementById('status');
         document.getElementById('room-name').textContent = roomID;
 
@@ -49,14 +104,54 @@
 
         ws.onopen = function() { status.textContent = 'Connected to ' + roomID; };
         ws.onclose = function() { status.textContent = 'Disconnected'; };
+
+        // ---- 弹幕海：密集行 + 多样变化 ----
+        const ROW_HEIGHT = 22;
+        const rowCount = Math.floor(box.clientHeight / ROW_HEIGHT);
+        const rowPositions = Array.from({ length: rowCount }, (_, i) => i * ROW_HEIGHT + 4);
+
+        // 随机行（允许多条同行，制造密度）
+        function randRow() {
+            return rowPositions[Math.floor(Math.random() * rowPositions.length)];
+        }
+
+        function randDur() {
+            return (2.5 + Math.random() * 2).toFixed(1); // 2.5~4.5 秒
+        }
+
+        // 负 delay 让弹幕从不同 x 位置起步，避免全从右侧扎堆出现
+        function randDelay() {
+            return (-Math.random() * 2.8).toFixed(1); // -2.8 ~ 0 秒
+        }
+
         ws.onmessage = function(e) {
             const d = JSON.parse(e.data);
+            const type = d.type || 'scroll';
+
             const el = document.createElement('div');
-            el.className = 'item';
+            el.className = 'danmaku-item';
+
+            if (type === 'scroll') {
+                el.style.top = randRow() + 'px';
+                el.style.animationDuration = randDur() + 's';
+                el.style.animationDelay = randDelay() + 's';
+                el.addEventListener('animationend', () => el.remove());
+                el.classList.add('danmaku-scroll');
+            } else if (type === 'reverse') {
+                el.style.top = randRow() + 'px';
+                el.style.animationDuration = randDur() + 's';
+                el.style.animationDelay = randDelay() + 's';
+                el.addEventListener('animationend', () => el.remove());
+                el.classList.add('danmaku-reverse');
+            } else {
+                el.addEventListener('animationend', () => el.remove());
+                el.classList.add('danmaku-' + type);
+            }
+
+            el.style.color = d.color || '#ffffff';
+            el.style.fontSize = (d.font_size || 25) + 'px';
             el.textContent = d.content;
-            el.style.color = d.color;
             box.appendChild(el);
-            box.scrollTop = box.scrollHeight;
         };
 
         function send() {
@@ -66,7 +161,7 @@
                 content: text,
                 user_id: 'user_' + Date.now(),
                 color: '#ffffff',
-                position: 'middle'
+                type: typeSelect.value
             }));
             input.value = '';
         }

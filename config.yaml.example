@@ -1,0 +1,26 @@
+# DanmakuFlow 配置文件示例
+# 复制为 config.yaml 并按需修改：
+#   cp config.yaml.example config.yaml
+
+server:
+  port: 8080
+
+websocket:
+  write_wait_seconds: 10
+  pong_wait_seconds: 60
+  max_message_size: 512
+  broadcast_buffer_size: 256
+  send_buffer_size: 256
+
+log:
+  # debug / info / warn / error
+  level: debug
+  # text（开发友好）/ json（结构化，对接日志收集系统）
+  format: text
+
+store:
+  default_list_limit: 20
+  # MySQL DSN，留空 = 使用 MemoryStore
+  dsn: "user:password@tcp(127.0.0.1:3306)/danmaku?charset=utf8mb4&parseTime=True&loc=Local"
+  # 异步写入通道缓冲区大小（0 = 同步写）
+  async_buffer_size: 1024

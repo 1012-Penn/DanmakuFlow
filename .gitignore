@@ -19,6 +19,12 @@ Thumbs.db
 # Environment
 .env
 
+# Local config (contains secrets like DB password)
+config.yaml
+
+# Log files
+*.log
+
 # Hugo build artifacts
 .hugo_build.lock
 public/

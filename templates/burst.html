@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>弹幕爆发测试</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: system-ui, sans-serif;
+            background: #1a1a2e; color: #fff;
+            display: flex; justify-content: center; align-items: center;
+            min-height: 100vh;
+        }
+        .card {
+            background: #16213e; border-radius: 12px;
+            padding: 32px; width: 480px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+        }
+        h1 { font-size: 22px; margin-bottom: 8px; }
+        .sub { font-size: 14px; color: #888; margin-bottom: 24px; }
+
+        .row { display: flex; gap: 12px; align-items: center; margin-bottom: 16px; }
+        .row label { width: 80px; color: #aaa; font-size: 14px; }
+        .row input[type=range] { flex: 1; }
+        .row .val { min-width: 36px; text-align: right; color: #e94560; font-weight: bold; }
+
+        .btn {
+            width: 100%; padding: 16px; font-size: 18px; font-weight: bold;
+            border: none; border-radius: 8px; cursor: pointer;
+            background: #e94560; color: #fff; transition: .2s;
+        }
+        .btn:hover { background: #ff6b81; }
+        .btn:active { transform: scale(0.97); }
+        .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+        .status { margin-top: 12px; font-size: 13px; text-align: center; color: #888; }
+        .status.ok { color: #2ecc71; }
+
+        .tags { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0; }
+        .tags span {
+            font-size: 12px; padding: 3px 10px; border-radius: 12px;
+            background: #0f3460; color: #aaa;
+        }
+        .tags span.on { background: #e94560; color: #fff; }
+    </style>
+</head>
+<body>
+<div class="card">
+    <h1>🎆 弹幕爆发测试</h1>
+    <div class="sub">一键生成大量弹幕，观察渲染效果与性能表现</div>
+
+    <div class="row">
+        <label>房间</label>
+        <input id="roomInput" value="test" style="flex:1; padding:6px 10px; border-radius:6px; border:none; background:#0f3460; color:#fff;">
+    </div>
+
+    <div class="row">
+        <label>数量</label>
+        <input type="range" id="countSlider" min="10" max="2000" value="300">
+        <span class="val" id="countVal">80</span>
+    </div>
+
+    <div class="row">
+        <label>间隔 (ms)</label>
+        <input type="range" id="intervalSlider" min="0" max="500" value="80" step="10">
+        <span class="val" id="intervalVal">80</span>
+    </div>
+
+    <div class="tags" id="typeTags">
+        <span data-type="scroll">滚动</span>
+        <span data-type="top">顶部</span>
+        <span data-type="bottom">底部</span>
+        <span data-type="reverse">逆向</span>
+    </div>
+
+    <button class="btn" id="burstBtn" disabled>🚀 连接中…</button>
+    <div class="status" id="status">Connecting…</div>
+</div>
+
+<script>
+    const roomInput = document.getElementById('roomInput');
+    const countSlider = document.getElementById('countSlider');
+    const countVal = document.getElementById('countVal');
+    const intervalSlider = document.getElementById('intervalSlider');
+    const intervalVal = document.getElementById('intervalVal');
+    const burstBtn = document.getElementById('burstBtn');
+    const statusEl = document.getElementById('status');
+    const typeTags = document.getElementById('typeTags');
+
+    let ws = null;
+    let sending = false;
+
+    // ---- 滑块联动 ----
+    countSlider.oninput = () => countVal.textContent = countSlider.value;
+    intervalSlider.oninput = () => intervalVal.textContent = intervalSlider.value;
+
+    // ---- 类型选择 ----
+    let selectedTypes = new Set(['scroll']);
+    typeTags.querySelectorAll('span').forEach(el => {
+        el.classList.toggle('on', el.dataset.type === 'scroll');
+        el.style.cursor = 'pointer';
+        el.onclick = () => {
+            el.classList.toggle('on');
+            if (el.classList.contains('on')) selectedTypes.add(el.dataset.type);
+            else selectedTypes.delete(el.dataset.type);
+            // 保证至少选一个
+            if (selectedTypes.size === 0) { el.classList.add('on'); selectedTypes.add(el.dataset.type); }
+        };
+    });
+
+    // ---- 弹幕内容库 ----
+    const contents = [
+        '前方高能预警！', '233333', '哈哈哈哈哈', '牛逼', '666666',
+        '这也太好看了吧', 'awsl', '妈妈问我为什么跪着看', '名场面',
+        '梦开始的地方', '泪目', '全体起立', '经典永流传', '此处应有掌声',
+        '不懂就问这是什么番', '打卡', '二刷报道', '进度条撑住',
+        '耳机党阵亡', '弹幕护体', '前方核能', '警告！这不是演习',
+        '日常催更（1/1）', '承包这个镜头', '截图干嘛愣着啊',
+        '这操作我学不会', '教练我想学这个', '过于真实', '是我本人了',
+        '导演：这段掐了别播', '经费在燃烧', '画风突变',
+        '欢迎回来', '完结撒花', '第二季什么时候出',
+    ];
+
+    const colors = ['#ffffff','#e94560','#ff6b81','#ffa502','#2ed573','#1e90ff','#a29bfe','#fd79a8'];
+
+    // ---- WebSocket ----
+    function connect() {
+        const room = roomInput.value.trim() || 'test';
+        ws = new WebSocket('ws://localhost:8080/ws?room=' + room);
+
+        ws.onopen = () => {
+            statusEl.textContent = '✅ 已连接房间 ' + room;
+            statusEl.className = 'status ok';
+            burstBtn.textContent = '🎆 发射弹幕海！';
+            burstBtn.disabled = false;
+        };
+        ws.onclose = () => {
+            statusEl.textContent = '❌ 已断开，3 秒后重连…';
+            statusEl.className = 'status';
+            burstBtn.textContent = '⏳ 重连中…';
+            burstBtn.disabled = true;
+            setTimeout(connect, 3000);
+        };
+    }
+
+    // ---- 发射 ----
+    burstBtn.onclick = () => {
+        if (sending || !ws || ws.readyState !== WebSocket.OPEN) return;
+        sending = true;
+        burstBtn.disabled = true;
+        burstBtn.textContent = '⏳ 发射中…';
+
+        const count = parseInt(countSlider.value);
+        const interval = parseInt(intervalSlider.value);
+        const typeArr = [...selectedTypes];
+        let sent = 0;
+
+        function sendOne() {
+            if (sent >= count) {
+                sending = false;
+                burstBtn.disabled = false;
+                burstBtn.textContent = '🎆 再射一波！';
+                return;
+            }
+
+            ws.send(JSON.stringify({
+                content: contents[sent % contents.length],
+                user_id: 'burst_' + sent,
+                color: colors[Math.floor(Math.random() * colors.length)],
+                type: typeArr[Math.floor(Math.random() * typeArr.length)],
+            }));
+            sent++;
+            statusEl.textContent = '📨 已发射 ' + sent + ' / ' + count;
+
+            if (interval > 0) setTimeout(sendOne, interval);
+            else setImmediate ? setImmediate(sendOne) : setTimeout(sendOne, 0);
+        }
+
+        sendOne();
+    };
+
+    // ---- 房间切换自动重连 ----
+    roomInput.onchange = () => { ws && ws.close(); connect(); };
+
+    connect();
+</script>
+</body>
+</html>

@@ -28,8 +28,8 @@ func setupTest(t *testing.T) (*httptest.Server, *danmakuws.Hub) {
 
 	hub := danmakuws.NewHub()
 	s := store.New()
-	svc := service.NewDanmakuService(s, hub)
-	h := handler.New(svc, hub)
+	svc := service.NewDanmakuService(s, hub, 0)
+	h := handler.New(svc, hub, 20)
 
 	h.RegisterRoutes(r)
 	r.StaticFile("/", "./templates/index.html")
@@ -103,7 +103,7 @@ func TestCrossRoomIsolation(t *testing.T) {
 	wsB := wsConnect(t, server, "room_b")
 
 	// A 发消息
-	msgA := `{"content":"a_only","user_id":"u1","color":"#fff","position":"middle"}`
+	msgA := `{"content":"a_only","user_id":"u1","color":"#fff","type":"scroll"}`
 	assert.NoError(t, wsA.WriteMessage(websocket.TextMessage, []byte(msgA)))
 
 	// A 应该收到（广播给自己）

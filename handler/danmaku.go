@@ -12,14 +12,19 @@ import (
 // DanmakuHandler 是弹幕相关的 HTTP 处理器。
 // 通过依赖注入接收 Service 和 Hub，不依赖具体实现。
 type DanmakuHandler struct {
-	svc *service.DanmakuService
-	hub *websocket.Hub
+	svc              *service.DanmakuService
+	hub              *websocket.Hub
+	defaultListLimit int // GET /api/danmaku 默认返回条数
 }
 
 // New 创建一个 DanmakuHandler。
-// 依赖（svc, hub）从外部注入，便于测试和替换。
-func New(svc *service.DanmakuService, hub *websocket.Hub) *DanmakuHandler {
-	return &DanmakuHandler{svc: svc, hub: hub}
+// 依赖（svc, hub, defaultListLimit）从外部注入，便于测试和替换。
+func New(svc *service.DanmakuService, hub *websocket.Hub, defaultListLimit int) *DanmakuHandler {
+	return &DanmakuHandler{
+		svc:              svc,
+		hub:              hub,
+		defaultListLimit: defaultListLimit,
+	}
 }
 
 // Create 处理 POST /api/danmaku
@@ -44,7 +49,7 @@ func (h *DanmakuHandler) List(c *gin.Context) {
 		return
 	}
 
-	list := h.svc.ListByRoom(roomID, 20)
+	list := h.svc.ListByRoom(roomID, h.defaultListLimit)
 	c.JSON(http.StatusOK, list)
 }
 

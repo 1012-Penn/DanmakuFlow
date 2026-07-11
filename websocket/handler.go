@@ -33,6 +33,7 @@ func ServeWs(hub *Hub, handler MessageHandler, c *gin.Context) {
 	}
 
 	// 找到或创建房间，然后注册客户端
+	// NewClient 自动从 hub.cfg 读取 send channel 缓冲区大小
 	room := hub.GetOrCreateRoom(roomID)
 	client := NewClient(hub, room, conn, handler)
 
