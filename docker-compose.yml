@@ -16,5 +16,13 @@ services:
       --character-set-server=utf8mb4
       --collation-server=utf8mb4_unicode_ci
 
+  redis:
+    image: redis:7-alpine
+    container_name: danmaku-redis
+    ports:
+      - "6379:6379"
+    # 弹幕场景中 Redis 只做实时广播，不持久化。MySQL 兜底
+    command: redis-server --loglevel warning
+
 volumes:
   mysql_data:

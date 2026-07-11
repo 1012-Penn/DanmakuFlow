@@ -19,6 +19,7 @@ type Config struct {
 	WebSocket WebSocketConfig `yaml:"websocket"`
 	Store     StoreConfig     `yaml:"store"`
 	Log       LogConfig       `yaml:"log"`
+	Redis     RedisConfig     `yaml:"redis"`
 }
 
 // ServerConfig 存放 HTTP 服务器相关配置。
@@ -65,6 +66,12 @@ type StoreConfig struct {
 	AsyncBufferSize  int    `yaml:"async_buffer_size"`  // 异步写入通道缓冲区大小（0=同步写）
 }
 
+// RedisConfig 存放 Redis 连接配置。
+type RedisConfig struct {
+	Addr       string `yaml:"addr"`        // Redis 地址，如 "localhost:6379"。空 = 不使用 Redis
+	InstanceID string `yaml:"instance_id"` // 实例标识（用于去重）。空 = 自动生成
+}
+
 // Load 从指定路径加载 YAML 配置文件。
 // 如果文件不存在，返回默认配置（不会报错）。
 // 如果文件存在但解析失败，返回错误。
@@ -107,6 +114,10 @@ func Default() *Config {
 		Log: LogConfig{
 			Level:  "info",
 			Format: "text",
+		},
+		Redis: RedisConfig{
+			Addr:       "", // 空 = 不使用 Redis
+			InstanceID: "",
 		},
 	}
 }

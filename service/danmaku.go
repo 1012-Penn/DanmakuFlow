@@ -230,8 +230,9 @@ func (s *DanmakuService) createAndBroadcast(req CreateDanmakuRequest) (model.Dan
 	}
 
 	// 广播始终同步（低延迟要求）
+	// BroadcastToRoom 负责本地广播 + Redis 跨实例广播
 	data, _ := json.Marshal(dm)
-	s.hub.GetOrCreateRoom(req.RoomID).Broadcast(data)
+	s.hub.BroadcastToRoom(req.RoomID, data)
 
 	return dm, nil
 }

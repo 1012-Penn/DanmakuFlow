@@ -1,12 +1,15 @@
 package websocket
 
 import (
+	"context"
 	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/1012-Penn/DanmakuFlow/redisclient"
 )
 
 // 以下是默认配置常量，NewHub() 使用它们创建默认 Hub。
@@ -152,10 +155,14 @@ type Hub struct {
 	mu           sync.RWMutex //保护rooms map的并发访问
 	cfg          Config       // 配置（创建后不可变）
 	shutdownOnce sync.Once    // 保证 Shutdown 只执行一次
+
+	redisClient *redisclient.Client // Redis 跨实例广播客户端，nil = 不使用
+	redisCancel context.CancelFunc  // 用于停止 redisSubscribeLoop goroutine
+	wg          sync.WaitGroup      // 等待后台 goroutine 退出（Redis 订阅）
 }
 
 // NewHub 使用默认配置创建 Hub。
-// 等价于 NewHubWithConfig(默认值)。
+// 等价于 NewHubWithConfig(默认配置, nil)。
 func NewHub() *Hub {
 	return NewHubWithConfig(Config{
 		WriteWaitSeconds:    defaultWriteWaitSeconds,
@@ -163,15 +170,64 @@ func NewHub() *Hub {
 		MaxMessageSize:      defaultMaxMessageSize,
 		BroadcastBufferSize: defaultBroadcastBufferSize,
 		SendBufferSize:      defaultSendBufferSize,
-	})
+	}, nil)
 }
 
 // NewHubWithConfig 使用指定配置创建 Hub。
-func NewHubWithConfig(cfg Config) *Hub {
-	return &Hub{
-		rooms: make(map[string]*Room),
-		cfg:   cfg,
+// redisClient 为 nil 时回退到纯内存广播（向后兼容）。
+func NewHubWithConfig(cfg Config, redisClient *redisclient.Client) *Hub {
+	h := &Hub{
+		rooms:       make(map[string]*Room),
+		cfg:         cfg,
+		redisClient: redisClient,
 	}
+
+	// 如果有 Redis 客户端，启动跨实例广播订阅循环
+	if redisClient != nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		h.redisCancel = cancel
+		h.wg.Add(1)
+		go h.redisSubscribeLoop(ctx)
+	}
+
+	return h
+}
+
+// BroadcastToRoom 向指定房间广播消息，同时通过 Redis 跨实例广播。
+// 这是 service 层调用的统一入口——替代直接调用 GetOrCreateRoom(..).Broadcast()。
+//
+// 流程：
+//  1. 本地广播（本机内存的客户端）
+//  2. 如果有 Redis 配置，也发布一份到 Redis（其他实例会收到并广播）
+func (h *Hub) BroadcastToRoom(roomID string, data []byte) {
+	// 1. 本地广播（与之前一样）
+	room := h.GetOrCreateRoom(roomID)
+	room.Broadcast(data)
+
+	// 2. 跨实例广播（通过 Redis Pub/Sub，2 秒超时）
+	if h.redisClient != nil {
+		pubCtx, pubCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer pubCancel()
+		if err := h.redisClient.Publish(pubCtx, roomID, data); err != nil {
+			slog.Error("Redis 发布失败",
+				"room_id", roomID,
+				"error", err,
+			)
+		}
+	}
+}
+
+// redisSubscribeLoop 在后台 goroutine 中接收 Redis 跨实例广播消息。
+// 收到消息后找到对应的房间，做本地广播。
+// ctx 取消时（Hub.Shutdown 时），goroutine 退出。
+func (h *Hub) redisSubscribeLoop(ctx context.Context) {
+	ch := h.redisClient.Subscribe(ctx)
+	defer h.wg.Done()
+	for msg := range ch {
+		room := h.GetOrCreateRoom(msg.RoomID)
+		room.Broadcast(msg.Data)
+	}
+	slog.Info("Redis 订阅循环已退出")
 }
 
 // 以下是 Client 用到的便利方法，从 cfg 中取值转换 time.Duration。
@@ -227,11 +283,18 @@ func (h *Hub) RemoveRoomIfSame(roomID string, room *Room) {
 }
 
 // Shutdown 优雅关闭所有房间。
-// 向每个房间发送停止信号 → 房间给所有客户端发关闭帧 → 退出 Room.Run()。
+// 先取消 Redis 订阅循环，再关闭房间。
 // sync.Once 保证即使多次调用也只执行一次。
 func (h *Hub) Shutdown() {
 	h.shutdownOnce.Do(func() {
 		slog.Info("WebSocket Hub 开始关闭...")
+
+		// 先停止 Redis 订阅循环，不再接收跨实例广播
+		if h.redisCancel != nil {
+			h.redisCancel()
+			h.wg.Wait() // 等待 redisSubscribeLoop goroutine 确实退出
+		}
+
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		for _, room := range h.rooms {

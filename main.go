@@ -14,6 +14,7 @@ import (
 
 	"github.com/1012-Penn/DanmakuFlow/config"
 	"github.com/1012-Penn/DanmakuFlow/handler"
+	"github.com/1012-Penn/DanmakuFlow/redisclient"
 	"github.com/1012-Penn/DanmakuFlow/service"
 	"github.com/1012-Penn/DanmakuFlow/store"
 	"github.com/1012-Penn/DanmakuFlow/websocket"
@@ -31,14 +32,32 @@ func main() {
 	// 初始化结构化日志（slog）
 	initLogger(cfg.Log)
 
-	// 创建 Hub（房间管理器），传入 WebSocket 配置
+	// 创建 Redis 客户端（如果有配置）
+	var redisClient *redisclient.Client
+	if cfg.Redis.Addr != "" {
+		instanceID := cfg.Redis.InstanceID
+		if instanceID == "" {
+			instanceID, _ = os.Hostname()
+		}
+		redisClient = redisclient.New(cfg.Redis.Addr, instanceID)
+		if err := redisClient.Ping(context.Background()); err != nil {
+			slog.Error("Redis 连接失败", "addr", cfg.Redis.Addr, "error", err)
+			os.Exit(1)
+		}
+		slog.Info("已连接 Redis",
+			"addr", cfg.Redis.Addr,
+			"instance_id", instanceID,
+		)
+	}
+
+	// 创建 Hub（房间管理器），传入 WebSocket 配置和可选的 Redis 客户端
 	hub := websocket.NewHubWithConfig(websocket.Config{
 		WriteWaitSeconds:    cfg.WebSocket.WriteWaitSeconds,
 		PongWaitSeconds:     cfg.WebSocket.PongWaitSeconds,
 		MaxMessageSize:      cfg.WebSocket.MaxMessageSize,
 		BroadcastBufferSize: cfg.WebSocket.BroadcastBufferSize,
 		SendBufferSize:      cfg.WebSocket.SendBufferSize,
-	})
+	}, redisClient)
 
 	// 关闭 Gin 的调试日志（我们用自己的日志代替）
 	gin.SetMode(gin.ReleaseMode)
@@ -113,7 +132,13 @@ func main() {
 	}
 	drainCancel()
 
-	// 4. 关闭 MySQL 数据库连接（此时确保无更多写入）
+	// 4. 关闭 Redis 连接（此时已停止订阅，不会再有跨实例广播）
+	if redisClient != nil {
+		redisClient.Close()
+		slog.Info("Redis 连接已关闭")
+	}
+
+	// 5. 关闭 MySQL 数据库连接（此时确保无更多写入）
 	if ms, ok := s.(*store.MySQLStore); ok {
 		ms.Close()
 		slog.Info("MySQL 连接已关闭")
