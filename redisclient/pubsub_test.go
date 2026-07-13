@@ -2,8 +2,53 @@ package redisclient
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
+
+// TestGenerateInstanceID 验证实例 ID 生成策略：
+//   - 格式为 {prefix}-{pid}-{uuid_short}
+//   - 同一 prefix 两次生成的 ID 不同（UUID 部分变化）
+//   - 空 prefix 时使用 hostname
+func TestGenerateInstanceID(t *testing.T) {
+	t.Run("带前缀", func(t *testing.T) {
+		id := GenerateInstanceID("pub")
+		parts := strings.Split(id, "-")
+		if len(parts) < 3 {
+			t.Fatalf("期望格式 prefix-pid-uuid, 得到 %q", id)
+		}
+		if parts[0] != "pub" {
+			t.Errorf("前缀应为 %q, 得到 %q", "pub", parts[0])
+		}
+	})
+
+	t.Run("空前缀使用 hostname", func(t *testing.T) {
+		id := GenerateInstanceID("")
+		parts := strings.Split(id, "-")
+		if len(parts) < 3 {
+			t.Fatalf("期望格式 hostname-pid-uuid, 得到 %q", id)
+		}
+		// 第一部分不是空字符串
+		if parts[0] == "" {
+			t.Error("hostname 部分不应为空")
+		}
+	})
+
+	t.Run("同一 prefix 两次生成不同", func(t *testing.T) {
+		a := GenerateInstanceID("test")
+		b := GenerateInstanceID("test")
+		if a == b {
+			t.Error("两次生成的 ID 应不同, 但相同: " + a)
+		}
+	})
+
+	t.Run("特殊字符被清理", func(t *testing.T) {
+		id := GenerateInstanceID("hello world!@#$")
+		if strings.Contains(id, " ") || strings.Contains(id, "!") || strings.Contains(id, "@") {
+			t.Errorf("特殊字符应被替换, 得到 %q", id)
+		}
+	})
+}
 
 // TestMessageMarshalUnmarshal 验证 Message 的 JSON 编解码正确。
 // 不依赖外部 Redis 实例，纯数据层测试。

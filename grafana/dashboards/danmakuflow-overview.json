@@ -1,0 +1,206 @@
+{
+  "title": "DanmakuFlow Overview",
+  "uid": "danmakuflow-overview",
+  "version": 1,
+  "panels": [
+    {
+      "title": "Instance Status",
+      "type": "stat",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "up{app=\"danmakuflow\"}",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "gridPos": {"h": 4, "w": 4, "x": 0, "y": 0}
+    },
+    {
+      "title": "Active Connections",
+      "type": "stat",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "sum(danmakuflow_ws_connections)",
+          "legendFormat": "Total"
+        }
+      ],
+      "gridPos": {"h": 4, "w": 4, "x": 4, "y": 0}
+    },
+    {
+      "title": "Active Rooms",
+      "type": "stat",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "sum(danmakuflow_ws_active_rooms)",
+          "legendFormat": "Total"
+        }
+      ],
+      "gridPos": {"h": 4, "w": 4, "x": 8, "y": 0}
+    },
+    {
+      "title": "Per Instance Connections",
+      "type": "graph",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "danmakuflow_ws_connections{instance=~\"danmaku-[ab]:8080\"}",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "gridPos": {"h": 6, "w": 8, "x": 0, "y": 4}
+    },
+    {
+      "title": "Danmaku Receive Rate",
+      "type": "graph",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "rate(danmakuflow_ws_messages_received_total[1m])",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "gridPos": {"h": 6, "w": 8, "x": 8, "y": 4}
+    },
+    {
+      "title": "Client Delivery Rate",
+      "type": "graph",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "rate(danmakuflow_ws_client_deliveries_total[1m])",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "gridPos": {"h": 6, "w": 8, "x": 0, "y": 10}
+    },
+    {
+      "title": "Broadcast Drops / Slow Kicks",
+      "type": "graph",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "rate(danmakuflow_ws_broadcast_drops_total[1m])",
+          "legendFormat": "drops"
+        },
+        {
+          "expr": "rate(danmakuflow_ws_slow_kicks_total[1m])",
+          "legendFormat": "slow_kicks"
+        }
+      ],
+      "gridPos": {"h": 6, "w": 8, "x": 8, "y": 10}
+    },
+    {
+      "title": "Redis Publish P95 Latency",
+      "type": "graph",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, rate(danmakuflow_redis_publish_latency_seconds_bucket[1m]))",
+          "legendFormat": "P95"
+        }
+      ],
+      "gridPos": {"h": 6, "w": 8, "x": 0, "y": 16}
+    },
+    {
+      "title": "Redis Publish Errors / Drops",
+      "type": "graph",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "rate(danmakuflow_redis_publish_total{result=\"error\"}[1m])",
+          "legendFormat": "errors"
+        },
+        {
+          "expr": "rate(danmakuflow_redis_publish_total{result=\"dropped\"}[1m])",
+          "legendFormat": "dropped"
+        }
+      ],
+      "gridPos": {"h": 6, "w": 8, "x": 8, "y": 16}
+    },
+    {
+      "title": "Redis Publish Queue Length",
+      "type": "graph",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "danmakuflow_redis_publish_queue_len",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "gridPos": {"h": 6, "w": 8, "x": 0, "y": 22}
+    },
+    {
+      "title": "MySQL Write P95 Latency",
+      "type": "graph",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, rate(danmakuflow_persist_write_latency_seconds_bucket[1m]))",
+          "legendFormat": "P95"
+        }
+      ],
+      "gridPos": {"h": 6, "w": 8, "x": 8, "y": 22}
+    },
+    {
+      "title": "Persist Write Failures / Drops",
+      "type": "graph",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "rate(danmakuflow_persist_writes_total{result=\"drop\"}[1m])",
+          "legendFormat": "drops"
+        }
+      ],
+      "gridPos": {"h": 6, "w": 8, "x": 0, "y": 28}
+    },
+    {
+      "title": "HTTP QPS",
+      "type": "graph",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "rate(danmakuflow_http_requests_total[1m])",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "gridPos": {"h": 6, "w": 8, "x": 8, "y": 28}
+    },
+    {
+      "title": "HTTP P95 Latency",
+      "type": "graph",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, rate(danmakuflow_http_request_duration_seconds_bucket[1m]))",
+          "legendFormat": "P95"
+        }
+      ],
+      "gridPos": {"h": 6, "w": 8, "x": 0, "y": 34}
+    },
+    {
+      "title": "Async Channel Usage",
+      "type": "graph",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "danmakuflow_persist_async_chan_len",
+          "legendFormat": "len"
+        },
+        {
+          "expr": "danmakuflow_persist_async_chan_cap",
+          "legendFormat": "cap"
+        }
+      ],
+      "gridPos": {"h": 6, "w": 8, "x": 8, "y": 34}
+    }
+  ],
+  "schemaVersion": 38,
+  "tags": ["danmaku", "websocket", "realtime"],
+  "time": {
+    "from": "now-5m",
+    "to": "now"
+  },
+  "timezone": "browser"
+}

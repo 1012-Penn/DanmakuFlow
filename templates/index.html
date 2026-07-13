@@ -65,6 +65,8 @@
         select option { background: #1a1a2e; }
 
         .status { font-size: 14px; color: #888; margin-top: 8px; }
+        .status.ok { color: #2ecc71; }
+        .status.error { color: #e94560; }
         .error { color: #e94560; font-size: 18px; text-align: center; margin-top: 100px; }
     </style>
 </head>
@@ -97,35 +99,40 @@
         const box = document.getElementById('box');
         const input = document.getElementById('input');
         const typeSelect = document.getElementById('typeSelect');
-        const status = document.getElementById('status');
+        const statusEl = document.getElementById('status');
         document.getElementById('room-name').textContent = roomID;
 
-        const ws = new WebSocket('ws://localhost:8080/ws?room=' + roomID);
+        // ---- 重连状态 ----
+        let ws = null;
+        let reconnectAttempts = 0;
+        let reconnectTimer = null;
 
-        ws.onopen = function() { status.textContent = 'Connected to ' + roomID; };
-        ws.onclose = function() { status.textContent = 'Disconnected'; };
+        // ---- 历史补偿追踪 ----
+        let lastMessageId = '';
+        let lastTimestamp = '';
+
+        // 弹幕去重 set（重连时用）
+        const renderedIds = new Set();
 
         // ---- 弹幕海：密集行 + 多样变化 ----
         const ROW_HEIGHT = 22;
         const rowCount = Math.floor(box.clientHeight / ROW_HEIGHT);
         const rowPositions = Array.from({ length: rowCount }, (_, i) => i * ROW_HEIGHT + 4);
 
-        // 随机行（允许多条同行，制造密度）
         function randRow() {
             return rowPositions[Math.floor(Math.random() * rowPositions.length)];
         }
 
         function randDur() {
-            return (2.5 + Math.random() * 2).toFixed(1); // 2.5~4.5 秒
+            return (2.5 + Math.random() * 2).toFixed(1);
         }
 
-        // 负 delay 让弹幕从不同 x 位置起步，避免全从右侧扎堆出现
         function randDelay() {
-            return (-Math.random() * 2.8).toFixed(1); // -2.8 ~ 0 秒
+            return (-Math.random() * 2.8).toFixed(1);
         }
 
-        ws.onmessage = function(e) {
-            const d = JSON.parse(e.data);
+        // ---- 渲染一条弹幕 ----
+        function renderDanmaku(d) {
             const type = d.type || 'scroll';
 
             const el = document.createElement('div');
@@ -152,22 +159,124 @@
             el.style.fontSize = (d.font_size || 25) + 'px';
             el.textContent = d.content;
             box.appendChild(el);
-        };
+        }
 
+        // ---- 创建 WebSocket 连接 ----
+        function connect() {
+            if (ws) { ws.onclose = null; ws.close(); ws = null; }
+
+            // 构建 WS URL，使用 location.host 避免硬编码
+            const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            let url = protocol + '//' + location.host + '/ws?room_id=' + encodeURIComponent(roomID);
+
+            // 断线重连时携带历史补偿参数
+            if (reconnectAttempts > 0 && lastTimestamp) {
+                url += '&since_time=' + encodeURIComponent(lastTimestamp);
+                if (lastMessageId) {
+                    url += '&last_message_id=' + encodeURIComponent(lastMessageId);
+                }
+            }
+
+            ws = new WebSocket(url);
+
+            ws.onopen = function() {
+                statusEl.textContent = '✅ Connected to ' + roomID;
+                statusEl.className = 'status ok';
+                reconnectAttempts = 0;
+                if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+            };
+
+            ws.onclose = function() {
+                statusEl.textContent = '❌ Disconnected';
+                statusEl.className = 'status';
+                scheduleReconnect();
+            };
+
+            ws.onmessage = function(e) {
+                var env;
+                try { env = JSON.parse(e.data); } catch(_) { return; }
+
+                switch (env.type) {
+                    case 'broadcast':
+                        if (env.payload) {
+                            // 追踪最后一条消息的 ID 和时间戳
+                            if (env.payload.id) lastMessageId = env.payload.id;
+                            if (env.payload.timestamp) lastTimestamp = env.payload.timestamp;
+                            // 广播渲染（无需去重）
+                            renderDanmaku(env.payload);
+                        }
+                        break;
+
+                    case 'history':
+                        if (env.payload && env.payload.danmaku) {
+                            // 历史补偿：按 message_id 去重
+                            env.payload.danmaku.forEach(function(d) {
+                                if (d.id && renderedIds.has(d.id)) return;
+                                if (d.id) renderedIds.add(d.id);
+                                if (d.id) lastMessageId = d.id;
+                                if (d.timestamp) lastTimestamp = d.timestamp;
+                                renderDanmaku(d);
+                            });
+                        }
+                        break;
+
+                    case 'ack':
+                        // 确认消息：可选在 status 显示
+                        if (env.payload && env.payload.ok) {
+                            statusEl.textContent = '✓ sent (' + (env.payload.message_id || '').slice(0, 8) + ')';
+                            statusEl.className = 'status ok';
+                        }
+                        break;
+
+                    case 'error':
+                        // 错误消息：在 status 显示原因
+                        if (env.payload) {
+                            statusEl.textContent = '✗ ' + (env.payload.message || env.payload.code || 'error');
+                            statusEl.className = 'status error';
+                        }
+                        break;
+                }
+            };
+        }
+
+        // ---- 指数退避重连 ----
+        function scheduleReconnect() {
+            if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+            reconnectAttempts++;
+            // 退避：1s, 2s, 4s, 8s, ... 最大 30s
+            var delay = Math.min(1000 * Math.pow(2, reconnectAttempts - 1), 30000);
+            // 加 ±20% jitter
+            delay = Math.round(delay * (0.8 + Math.random() * 0.4));
+
+            statusEl.textContent = '⏳ Reconnecting in ' + Math.round(delay / 1000) + 's... (#' + reconnectAttempts + ')';
+            statusEl.className = 'status';
+
+            reconnectTimer = setTimeout(function() { connect(); }, delay);
+        }
+
+        // ---- 发送弹幕 ----
         function send() {
             const text = input.value.trim();
-            if (!text) return;
+            if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+            // 使用新信封格式（旧裸格式仍被服务端兼容）
             ws.send(JSON.stringify({
-                content: text,
-                user_id: 'user_' + Date.now(),
-                color: '#ffffff',
-                type: typeSelect.value
+                type: 'danmaku',
+                payload: {
+                    content: text,
+                    user_id: 'user_' + Date.now(),
+                    color: '#ffffff',
+                    type: typeSelect.value
+                }
             }));
             input.value = '';
         }
 
         document.getElementById('sendBtn').onclick = send;
         input.onkeydown = function(e) { if (e.key === 'Enter') send(); };
+
+        // ---- 启动 ----
+        connect();
     </script>
 </body>
 </html>

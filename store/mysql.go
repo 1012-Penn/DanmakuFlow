@@ -1,6 +1,7 @@
 package store
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/1012-Penn/DanmakuFlow/model"
@@ -25,8 +26,9 @@ func NewMySQLStore(dsn string) (*MySQLStore, error) {
 		return nil, err
 	}
 
-	// 自动迁移：根据 model.Danmaku 创建/更新表结构
-	if err := db.AutoMigrate(&model.Danmaku{}); err != nil {
+	// 多实例可能同时启动。使用 MySQL advisory lock 将迁移串行化，避免
+	// 两个实例都判断表不存在后并发 CREATE TABLE。
+	if err := migrateWithLock(db); err != nil {
 		return nil, err
 	}
 
@@ -35,10 +37,33 @@ func NewMySQLStore(dsn string) (*MySQLStore, error) {
 	return s, nil
 }
 
+const migrationLockName = "danmakuflow_schema_migration"
+
+func migrateWithLock(db *gorm.DB) error {
+	return db.Connection(func(tx *gorm.DB) error {
+		var acquired int
+		if err := tx.Raw("SELECT GET_LOCK(?, ?)", migrationLockName, 30).Scan(&acquired).Error; err != nil {
+			return fmt.Errorf("acquire migration lock: %w", err)
+		}
+		if acquired != 1 {
+			return fmt.Errorf("acquire migration lock: timed out")
+		}
+
+		defer tx.Exec("SELECT RELEASE_LOCK(?)", migrationLockName)
+		if err := tx.AutoMigrate(&model.Danmaku{}); err != nil {
+			return fmt.Errorf("auto migrate: %w", err)
+		}
+		return nil
+	})
+}
+
 // Add 插入一条弹幕到 MySQL。
-func (s *MySQLStore) Add(dm model.Danmaku) {
-	// 忽略错误（弹幕写入不阻塞用户）
-	_ = s.db.Create(&dm).Error
+func (s *MySQLStore) Add(dm model.Danmaku) error {
+	err := s.db.Create(&dm).Error
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 // List 返回全局最近 limit 条弹幕。
@@ -50,6 +75,25 @@ func (s *MySQLStore) List(limit int) []model.Danmaku {
 		list[i], list[j] = list[j], list[i]
 	}
 	return list
+}
+
+// ListSince 返回指定房间在 sinceTime+lastID 之后的弹幕。
+// 排序：ORDER BY created_at ASC, id ASC。
+// 游标条件：(created_at > sinceTime) OR (created_at = sinceTime AND id > lastID)。
+func (s *MySQLStore) ListSince(roomID string, sinceTime time.Time, lastID string, limit int) ([]model.Danmaku, error) {
+	var list []model.Danmaku
+	err := s.db.Where("room_id = ?", roomID).
+		Where("(created_at > ?) OR (created_at = ? AND id > ?)", sinceTime, sinceTime, lastID).
+		Order("created_at ASC, id ASC").
+		Limit(limit).
+		Find(&list).Error
+	if err != nil {
+		return nil, err
+	}
+	if list == nil {
+		list = make([]model.Danmaku, 0)
+	}
+	return list, nil
 }
 
 // ListByRoom 返回指定房间最近 limit 条弹幕。
@@ -69,6 +113,15 @@ func (s *MySQLStore) ListByRoom(roomID string, limit int) []model.Danmaku {
 		list = make([]model.Danmaku, 0)
 	}
 	return list
+}
+
+// Ping 检查 MySQL 连接是否正常。
+func (s *MySQLStore) Ping() bool {
+	sqlDB, err := s.db.DB()
+	if err != nil {
+		return false
+	}
+	return sqlDB.Ping() == nil
 }
 
 // configurePool 设置数据库连接池参数。

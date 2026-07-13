@@ -2,11 +2,13 @@
 //
 // 支持从 YAML 文件加载配置，文件不存在时使用内置默认值。
 // 配置文件路径可以通过 CONFIG_PATH 环境变量覆盖。
+// 支持环境变量覆盖 YAML 中的对应字段（环境变量优先级更高）。
 package config
 
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -21,6 +23,7 @@ type Config struct {
 	Log       LogConfig       `yaml:"log"`
 	Redis     RedisConfig     `yaml:"redis"`
 	RateLimit RateLimitConfig `yaml:"rate_limit"`
+	Pprof     PprofConfig     `yaml:"pprof"`
 }
 
 // ServerConfig 存放 HTTP 服务器相关配置。
@@ -38,6 +41,11 @@ type WebSocketConfig struct {
 	MaxConnPerRoom      int      `yaml:"max_conn_per_room"`     // 每房间最大连接数，0=不限制
 	MaxConnPerIP        int      `yaml:"max_conn_per_ip"`       // 每 IP 最大连接数，0=不限制
 	AllowedOrigins      []string `yaml:"allowed_origins"`       // 允许的 Origin，空=不校验
+}
+
+// PprofConfig 存放 pprof 性能分析配置。
+type PprofConfig struct {
+	Enabled bool `yaml:"enabled"` // 是否开启 pprof 端点，默认 false
 }
 
 // RateLimitConfig 存放频率限制相关配置。
@@ -81,14 +89,15 @@ type RedisConfig struct {
 	InstanceID string `yaml:"instance_id"` // 实例标识（用于去重）。空 = 自动生成
 }
 
-// Load 从指定路径加载 YAML 配置文件。
+// Load 从指定路径加载 YAML 配置文件，再应用环境变量覆盖。
 // 如果文件不存在，返回默认配置（不会报错）。
 // 如果文件存在但解析失败，返回错误。
+// 环境变量优先级高于 YAML 配置。
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return Default(), nil
+			return applyEnvOverrides(Default()), nil
 		}
 		return nil, err
 	}
@@ -98,7 +107,42 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 
-	return &cfg, nil
+	return applyEnvOverrides(&cfg), nil
+}
+
+// applyEnvOverrides 用环境变量覆盖配置中的对应字段。
+// 环境变量为空时不覆盖。所有环境变量均为可选。
+//
+// 支持的环境变量：
+//
+//	SERVER_PORT               — 服务端口
+//	STORE_DSN                 — MySQL DSN（空 = 使用 MemoryStore）
+//	REDIS_ADDR                — Redis 地址（空 = 不使用 Redis）
+//	REDIS_INSTANCE_ID_PREFIX  — 实例 ID 前缀（空 = 自动生成）
+//	LOG_LEVEL                 — 日志级别（debug/info/warn/error）
+//	LOG_FORMAT                — 日志格式（text/json）
+func applyEnvOverrides(cfg *Config) *Config {
+	if v := os.Getenv("SERVER_PORT"); v != "" {
+		if port, err := strconv.Atoi(v); err == nil {
+			cfg.Server.Port = port
+		}
+	}
+	if v := os.Getenv("STORE_DSN"); v != "" {
+		cfg.Store.DSN = v
+	}
+	if v := os.Getenv("REDIS_ADDR"); v != "" {
+		cfg.Redis.Addr = v
+	}
+	if v := os.Getenv("REDIS_INSTANCE_ID_PREFIX"); v != "" {
+		cfg.Redis.InstanceID = v
+	}
+	if v := os.Getenv("LOG_LEVEL"); v != "" {
+		cfg.Log.Level = v
+	}
+	if v := os.Getenv("LOG_FORMAT"); v != "" {
+		cfg.Log.Format = v
+	}
+	return cfg
 }
 
 // Default 返回一份内置默认配置。

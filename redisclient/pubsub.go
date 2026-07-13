@@ -10,10 +10,51 @@ package redisclient
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
+	"math/rand/v2"
+	"os"
+	"strings"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
+
+	"github.com/1012-Penn/DanmakuFlow/metrics"
 )
+
+// GenerateInstanceID 生成全局唯一的运行实例标识。
+//
+// 策略：
+//   - prefix 非空时（来自配置）作为可读前缀
+//   - 自动追加 PID + UUID 短尾，确保同主机多进程 ID 不同
+//   - prefix 为空时使用 hostname
+//
+// 结果示例：
+//   - GenerateInstanceID("")      → "myhost-a1b2c3d4-5678"
+//   - GenerateInstanceID("pub")   → "pub-e5f6g7h8-9012"
+func GenerateInstanceID(prefix string) string {
+	if prefix == "" {
+		host, _ := os.Hostname()
+		if host == "" {
+			host = "unknown"
+		}
+		prefix = host
+	}
+	// 清理 prefix 中可能的分隔符
+	prefix = strings.Map(func(r rune) rune {
+		if r == '-' || r == '_' || r == '.' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			return r
+		}
+		return '-'
+	}, prefix)
+
+	pid := os.Getpid()
+	uid := uuid.New().String()
+	short := uid[:8] // 取 UUID 前 8 个字符
+
+	return fmt.Sprintf("%s-%d-%s", prefix, pid, short)
+}
 
 // Message 是 Redis Pub/Sub 中传输的消息结构。
 type Message struct {
@@ -44,7 +85,9 @@ func New(addr string, instanceID string) *Client {
 // Publish 将弹幕数据发布到指定房间的 Redis 频道。
 // 频道命名规则：room:<roomID>。
 // 发布的消息包含来源实例 ID，订阅方据此跳过自己发的消息。
+// 记录发布延迟、成功/失败计数等指标。
 func (c *Client) Publish(ctx context.Context, roomID string, data []byte) error {
+	start := time.Now()
 	msg := Message{
 		SourceID: c.instance,
 		RoomID:   roomID,
@@ -52,51 +95,112 @@ func (c *Client) Publish(ctx context.Context, roomID string, data []byte) error 
 	}
 	payload, err := json.Marshal(msg)
 	if err != nil {
+		metrics.RedisPublishTotal.WithLabelValues("error").Inc()
 		return err
 	}
-	return c.rdb.Publish(ctx, "room:"+roomID, payload).Err()
+	err = c.rdb.Publish(ctx, "room:"+roomID, payload).Err()
+	metrics.RedisPublishLatency.Observe(time.Since(start).Seconds())
+	if err != nil {
+		metrics.RedisPublishTotal.WithLabelValues("error").Inc()
+	} else {
+		metrics.RedisPublishTotal.WithLabelValues("success").Inc()
+	}
+	return err
 }
 
-// Subscribe 订阅所有房间频道（PSUBSCRIBE room:*），返回接收消息的 channel。
-// 使用 PSubscribe 模式匹配而不必为每个房间单独 Subscribe。
-// 收到的消息已自动过滤本实例发出的（SourceID 匹配则跳过）。
-//
-// ctx 用于控制订阅生命周期——ctx 取消时 goroutine 退出。
-func (c *Client) Subscribe(ctx context.Context) <-chan Message {
-	pubsub := c.rdb.PSubscribe(ctx, "room:*")
+// StartSubscription 启动可恢复的 Redis 订阅循环。
+// 返回的 channel 在 context 取消或订阅无法恢复时关闭。
+// 内部使用指数退避 + jitter 在连接断开后自动重连。
+func (c *Client) StartSubscription(ctx context.Context) <-chan Message {
 	ch := make(chan Message, 64)
-
-	go func() {
-		defer pubsub.Close()
-		defer close(ch) // 退出时关闭 channel，让消费者 range 退出
-		for {
-			redisMsg, err := pubsub.ReceiveMessage(ctx)
-			if err != nil {
-				// ctx 取消或连接断开，正常退出
-				slog.Debug("Redis 订阅已退出", "error", err)
-				return
-			}
-
-			var msg Message
-			if err := json.Unmarshal([]byte(redisMsg.Payload), &msg); err != nil {
-				slog.Warn("Redis 消息解析失败", "error", err)
-				continue
-			}
-
-			// 跳过自己发布的消息——本实例已经做过本地广播了
-			if msg.SourceID == c.instance {
-				continue
-			}
-
-			select {
-			case ch <- msg:
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-
+	go c.subscriptionLoop(ctx, ch)
 	return ch
+}
+
+const (
+	subBackoffMin = 100 * time.Millisecond
+	subBackoffMax = 30 * time.Second
+)
+
+func (c *Client) subscriptionLoop(ctx context.Context, ch chan<- Message) {
+	defer close(ch)
+
+	backoff := subBackoffMin
+
+	for {
+		// 检查 ctx 是否已取消
+		select {
+		case <-ctx.Done():
+			metrics.RedisSubStatus.Set(0)
+			return
+		default:
+		}
+
+		pubsub := c.rdb.PSubscribe(ctx, "room:*")
+		metrics.RedisSubStatus.Set(1)
+		backoff = subBackoffMin // 连接成功，重置退避
+
+		innerLoop := func() bool {
+			defer pubsub.Close()
+			for {
+				redisMsg, err := pubsub.ReceiveMessage(ctx)
+				if err != nil {
+					metrics.RedisSubStatus.Set(0)
+
+					if ctx.Err() != nil {
+						// context 取消，不重连
+						slog.Info("Redis 订阅已退出（shutdown）")
+						return false
+					}
+
+					// 连接错误，需要重连
+					metrics.RedisSubEvents.Inc()
+					slog.Warn("Redis 订阅断开，准备重连",
+						"error", err,
+						"backoff", backoff,
+					)
+
+					// 退避等待
+					jittered := time.Duration(float64(backoff) * (0.8 + rand.Float64()*0.4))
+					select {
+					case <-time.After(jittered):
+					case <-ctx.Done():
+						return false
+					}
+
+					// 指数退避
+					backoff = time.Duration(float64(backoff) * 2)
+					if backoff > subBackoffMax {
+						backoff = subBackoffMax
+					}
+					return true // 重连
+				}
+
+				var msg Message
+				if err := json.Unmarshal([]byte(redisMsg.Payload), &msg); err != nil {
+					slog.Warn("Redis 消息解析失败", "error", err)
+					continue
+				}
+
+				// 跳过自己发布的消息
+				if msg.SourceID == c.instance {
+					continue
+				}
+
+				select {
+				case ch <- msg:
+				case <-ctx.Done():
+					metrics.RedisSubStatus.Set(0)
+					return false
+				}
+			}
+		}()
+
+		if !innerLoop {
+			return // shutdown，不再重连
+		}
+		// innerLoop 返回 true → 继续外循环（重连）
+	}
 }
 
 // Close 关闭 Redis 连接。

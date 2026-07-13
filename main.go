@@ -5,15 +5,19 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/1012-Penn/DanmakuFlow/config"
 	"github.com/1012-Penn/DanmakuFlow/handler"
+	"github.com/1012-Penn/DanmakuFlow/metrics"
 	"github.com/1012-Penn/DanmakuFlow/redisclient"
 	"github.com/1012-Penn/DanmakuFlow/service"
 	"github.com/1012-Penn/DanmakuFlow/store"
@@ -32,20 +36,28 @@ func main() {
 	// 初始化结构化日志（slog）
 	initLogger(cfg.Log)
 
+	// 生成实例 ID（用于健康检查和指标）
+	instanceID := redisclient.GenerateInstanceID(cfg.Redis.InstanceID)
+	slog.Info("实例 ID", "instance_id", instanceID)
+
+	// 注册 Prometheus 指标（使用默认 Registry）
+	metrics.Register(prometheus.DefaultRegisterer)
+
 	// 创建 Redis 客户端（如果有配置）
+	redisConfigured := cfg.Redis.Addr != ""
 	var redisClient *redisclient.Client
 	if cfg.Redis.Addr != "" {
-		instanceID := cfg.Redis.InstanceID
-		if instanceID == "" {
-			instanceID, _ = os.Hostname()
-		}
 		redisClient = redisclient.New(cfg.Redis.Addr, instanceID)
-		if err := redisClient.Ping(context.Background()); err != nil {
+		pingCtx, pingCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		err := redisClient.Ping(pingCtx)
+		pingCancel()
+		if err != nil {
 			slog.Warn("Redis 连接失败，降级为纯本地广播",
 				"addr", cfg.Redis.Addr,
 				"error", err,
 			)
-			redisClient = nil // 降级：跳过 Redis，纯本地广播
+			redisClient.Close() // 关闭连接，避免资源泄漏
+			redisClient = nil   // 降级：跳过 Redis，纯本地广播
 		} else {
 			slog.Info("已连接 Redis",
 				"addr", cfg.Redis.Addr,
@@ -66,14 +78,22 @@ func main() {
 		AllowedOrigins:      cfg.WebSocket.AllowedOrigins,
 	}, redisClient)
 
+	// 即使 Redis 连接失败，只要配置了地址就标记为已配置，
+	// 让 Readyz 能正确报告 degraded 而非 disabled。
+	if redisConfigured {
+		hub.MarkRedisConfigured()
+	}
+
 	// 关闭 Gin 的调试日志（我们用自己的日志代替）
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
+	r.Use(handler.MetricsMiddleware())
 
 	// 选择存储后端：有 DSN 用 MySQL，否则用 MemoryStore
 	var s store.Store
-	if cfg.Store.DSN != "" {
+	hasDSN := cfg.Store.DSN != ""
+	if hasDSN {
 		mysqlStore, err := store.NewMySQLStore(cfg.Store.DSN)
 		if err != nil {
 			slog.Error("数据库连接失败", "error", err)
@@ -87,11 +107,31 @@ func main() {
 	}
 
 	// 组装依赖链
-	svc := service.NewDanmakuService(s, hub, cfg.Store.AsyncBufferSize, cfg.RateLimit.MessagesPerSec)
-	h := handler.New(svc, hub, cfg.Store.DefaultListLimit)
+	svc := service.NewDanmakuService(s, hub, cfg.Store.AsyncBufferSize, cfg.RateLimit.MessagesPerSec, hasDSN)
+	h := handler.New(svc, hub, cfg.Store.DefaultListLimit, instanceID)
 
 	// 注册所有路由
 	h.RegisterRoutes(r)
+
+	// 条件注册 pprof 路由（默认关闭）
+	if cfg.Pprof.Enabled {
+		pprofGroup := r.Group("/debug/pprof")
+		pprofGroup.GET("/", gin.WrapF(pprof.Index))
+		pprofGroup.GET("/cmdline", gin.WrapF(pprof.Cmdline))
+		pprofGroup.GET("/profile", gin.WrapF(pprof.Profile))
+		pprofGroup.GET("/symbol", gin.WrapF(pprof.Symbol))
+		pprofGroup.GET("/trace", gin.WrapF(pprof.Trace))
+		pprofGroup.GET("/allocs", gin.WrapH(pprof.Handler("allocs")))
+		pprofGroup.GET("/block", gin.WrapH(pprof.Handler("block")))
+		pprofGroup.GET("/goroutine", gin.WrapH(pprof.Handler("goroutine")))
+		pprofGroup.GET("/heap", gin.WrapH(pprof.Handler("heap")))
+		pprofGroup.GET("/mutex", gin.WrapH(pprof.Handler("mutex")))
+		pprofGroup.GET("/threadcreate", gin.WrapH(pprof.Handler("threadcreate")))
+		slog.Info("pprof 已启用，路径 /debug/pprof/")
+	}
+
+	// Prometheus 指标端点
+	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
 	// 前端页面
 	r.StaticFile("/", "./templates/index.html")
@@ -129,16 +169,16 @@ func main() {
 		slog.Error("HTTP 服务器关闭超时", "error", err)
 	}
 
-	// 2. 排空异步写库通道，等待 consumer 将剩余弹幕写入存储
-	//    必须在关 Hub 之前做，否则 in-flight 的 createAndBroadcast
-	//    可能会在 Hub 关闭后继续调 BroadcastToRoom
-	drainCtx, drainCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	// 2. 关闭 Service：禁止新弹幕请求，等待在途请求完成，排空异步写入通道
+	//    必须在 Hub 关闭前做，否则 in-flight 的 createAndBroadcast
+	//    可能在 Hub 关闭后继续调 BroadcastToRoom
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	if err := svc.Shutdown(drainCtx); err != nil {
-		slog.Warn("异步写入排空超时，部分弹幕可能未入库", "error", err)
+		slog.Warn("Service 关闭超时，部分弹幕可能未入库", "error", err)
 	}
 	drainCancel()
 
-	// 3. 关闭 WebSocket 连接（给所有客户端发关闭帧）
+	// 3. 关闭 WebSocket Hub：停止 Redis 后台，向所有房间发停止信号，等待房间退出
 	hub.Shutdown()
 
 	// 4. 关闭 Redis 连接（此时已停止订阅，不会再有跨实例广播）

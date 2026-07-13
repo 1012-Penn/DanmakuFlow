@@ -1,64 +1,64 @@
 package websocket
 
 import (
+	"encoding/json"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/1012-Penn/DanmakuFlow/model"
 )
 
-// MessageHandler 处理从 WebSocket 收到的消息。
-// 由 service 层实现，避免 websocket 包反向依赖 service 包。
+// MessageHandler 处理从 WebSocket 收到的消息，支持历史查询。
 type MessageHandler interface {
-	HandleMessage(roomID string, data []byte)
+	HandleMessage(roomID string, data []byte) model.HandleResult
+	// QueryHistory 查询断线期间的消息，用于重连补偿。
+	QueryHistory(roomID string, sinceTime time.Time, lastID string, limit int) ([]model.Danmaku, error)
 }
 
 // Client 管理一个 WebSocket 连接。
-//
-// 每个 Client 有两个 goroutine：
-//   - readPump:  从 conn 读消息 → 交给 MessageHandler 处理（存库 + 广播）
-//   - writePump: 从 send channel 取消息 → 写到 conn
 type Client struct {
-	hub        *Hub            // 所属 Hub（房间管理器）
-	room       *Room           // 所属房间
-	conn       *websocket.Conn // WebSocket 连接
-	send       chan []byte     // 待发送消息缓冲区
-	handler    MessageHandler  // 消息处理器（由 service 层实现）
-	remoteAddr string          // 客户端 IP（用于连接数计数和日志）
+	hub      *Hub
+	room     *Room
+	conn     *websocket.Conn
+	send     chan []byte
+	handler  MessageHandler
+	clientIP string
+
+	connReleased atomic.Bool
 }
 
-// NewClient 创建一个 Client。
-func NewClient(hub *Hub, room *Room, conn *websocket.Conn, handler MessageHandler) *Client {
-	// 从 RemoteAddr 提取 IP（格式 "ip:port"）
-	remoteAddr := conn.RemoteAddr().String()
+func NewClient(hub *Hub, room *Room, conn *websocket.Conn, handler MessageHandler, clientIP string) *Client {
 	return &Client{
-		hub:        hub,
-		room:       room,
-		conn:       conn,
-		send:       make(chan []byte, hub.sendBufferSize()),
-		handler:    handler,
-		remoteAddr: remoteAddr,
+		hub:      hub,
+		room:     room,
+		conn:     conn,
+		send:     make(chan []byte, hub.sendBufferSize()),
+		handler:  handler,
+		clientIP: clientIP,
 	}
 }
 
 // readPump 从 WebSocket 连接读消息 → 交给 MessageHandler 统一处理。
-//
-// 这是每个连接唯一一个读 goroutine：只调 conn.ReadMessage()。
-// 断开或出错时执行 defer 清理：通知 Room 注销自己、释放 IP 计数、关闭 TCP 连接。
-// 超时参数和消息大小限制均从 Hub 配置读取。
+// 断开或出错时执行 defer 清理。
+// 使用 select 风格的 unregister：当 Room 已停止时跳过 unregister 避免阻塞。
 func (c *Client) readPump() {
 	defer func() {
-		slog.Debug("WS 客户端断开",
-			"room_id", c.room.ID,
-			"remote", c.remoteAddr,
-		)
-		c.room.unregister <- c
-		c.hub.connDec(c.remoteAddr) // 释放 IP 连接计数
+		// 尝试向 room 发送注销信号，不阻塞
+		select {
+		case c.room.unregister <- c:
+		case <-c.room.done:
+			// Room 已停止，跳过 unregister
+		default:
+			// unregister channel 也可能已满，但 Room.Run 不会让它满
+		}
+		c.releaseConn()
 		c.conn.Close()
 	}()
 
 	pongWait := c.hub.pongWait()
-
 	c.conn.SetReadLimit(c.hub.maxMessageSize())
 	c.conn.SetReadDeadline(time.Now().Add(pongWait))
 	c.conn.SetPongHandler(func(string) error {
@@ -71,16 +71,59 @@ func (c *Client) readPump() {
 		if err != nil {
 			break
 		}
-		// 走统一业务逻辑：存库 + 广播，由 service 层完成
-		c.handler.HandleMessage(c.room.ID, msg)
+		result := c.handler.HandleMessage(c.room.ID, msg)
+		c.sendResult(result)
 	}
 }
 
+// sendResult 根据 HandleResult 构造 ACK 或 Error 信封，发送到 writePump。
+// 非阻塞发送：队列满时放弃 ACK。
+func (c *Client) sendResult(result model.HandleResult) {
+	var env model.MessageEnvelope
+
+	if !result.OK {
+		errPayload, _ := json.Marshal(model.ErrorPayload{
+			Code:    result.ErrorCode,
+			Message: result.Reason,
+		})
+		env = model.MessageEnvelope{
+			Type:    model.MsgTypeError,
+			Payload: errPayload,
+		}
+	} else {
+		ackPayload, _ := json.Marshal(model.AckPayload{
+			RequestID:   result.RequestID,
+			MessageID:   result.MessageID,
+			OK:          true,
+			Persistence: result.Persistence,
+		})
+		env = model.MessageEnvelope{
+			Type:    model.MsgTypeAck,
+			Payload: ackPayload,
+		}
+	}
+
+	data, _ := json.Marshal(env)
+	select {
+	case c.send <- data:
+	default:
+		slog.Warn("ACK 发送队列满，丢弃 ACK",
+			"message_id", result.MessageID,
+		)
+	}
+}
+
+// releaseConn 幂等地释放 IP 和房间连接计数。
+func (c *Client) releaseConn() {
+	if !c.connReleased.CompareAndSwap(false, true) {
+		return
+	}
+	c.hub.connReleaseAll(c.clientIP, c.room.ID)
+}
+
 // writePump 从 send channel 取消息 → 写到 WebSocket 连接。
-//
 // 同时负责定时发 Ping 保活。
-// send 被关闭时（Room unregister 时做的），自动退出循环。
-// Ping 间隔、写超时等参数均从 Hub 配置读取。
+// 这是唯一向 conn 写入数据的 goroutine，符合 gorilla/websocket 单 writer 约束。
 func (c *Client) writePump() {
 	writeWait := c.hub.writeWait()
 	ticker := time.NewTicker(c.hub.pingPeriod())
@@ -96,7 +139,6 @@ func (c *Client) writePump() {
 				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
-
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := c.conn.WriteMessage(websocket.TextMessage, msg); err != nil {
 				return

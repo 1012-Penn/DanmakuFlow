@@ -2,19 +2,16 @@ package websocket
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/gorilla/websocket"
-
+	"github.com/1012-Penn/DanmakuFlow/metrics"
 	"github.com/1012-Penn/DanmakuFlow/redisclient"
 )
 
-// 以下是默认配置常量，NewHub() 使用它们创建默认 Hub。
-// 调用 NewHubWithConfig(*Config) 可传入自定义配置覆盖。
 const (
 	defaultWriteWaitSeconds    = 10
 	defaultPongWaitSeconds     = 60
@@ -24,39 +21,34 @@ const (
 )
 
 // Config 存放 WebSocket 层所有可配置参数。
-// 由 config 包提供值，也可手动构造。
 type Config struct {
-	WriteWaitSeconds    int      // 写超时（秒）
-	PongWaitSeconds     int      // 等 Pong 超时（秒）
-	MaxMessageSize      int      // 单条消息最大字节数
-	BroadcastBufferSize int      // Room.broadcast 通道缓冲区大小
-	SendBufferSize      int      // Client.send 通道缓冲区大小
-	MaxConnPerRoom      int      // 每房间最大连接数，0=不限制
-	MaxConnPerIP        int      // 每 IP 最大连接数，0=不限制
-	AllowedOrigins      []string // 允许的 Origin，空=不校验
+	WriteWaitSeconds    int
+	PongWaitSeconds     int
+	MaxMessageSize      int
+	BroadcastBufferSize int
+	SendBufferSize      int
+	MaxConnPerRoom      int
+	MaxConnPerIP        int
+	AllowedOrigins      []string
 }
 
-// Hub 是房间管理器，持有 map[string]*Room。
-// rooms map 用 RWMutex 保护，支持并发读写。
-
-// Room表示一个独立的直播间
-// 每个Room有自己的客户端池子和广播通道,房间之间互不干扰
+// Room 表示一个独立的直播间。
+// clients/broadcast/stop 均可由 Hub 从外部发送信号，
+// 但 clients map 的读写只能由 Room.Run goroutine 完成。
 type Room struct {
-	//房间唯一标识, 比如"liveroom_001"
 	ID string
 
-	//这个房间里的所有客户端
 	clients    map[*Client]bool
 	broadcast  chan []byte
 	register   chan *Client
 	unregister chan *Client
-	hub        *Hub          // 所属 Hub，用于空房间时通知清理
-	count      atomic.Int64  // 在线人数，原子操作支持外部安全读取
-	stop       chan struct{} // 关闭此 channel 让 Run() 退出（优雅关闭用）
+	hub        *Hub
+	count      atomic.Int64
+	stop       chan struct{} // 关闭此 channel 让 Run() 退出
+	done       chan struct{} // Run() 退出后关闭此 channel
+	stopMu     sync.Once     // 确保 stop 只关闭一次
 }
 
-// NewRoom创建一个新房间
-// roomID是房间标识 由上层调用者传入(从URL参数解析)
 func NewRoom(roomID string, hub *Hub) *Room {
 	return &Room{
 		ID:         roomID,
@@ -66,81 +58,92 @@ func NewRoom(roomID string, hub *Hub) *Room {
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
 		stop:       make(chan struct{}),
+		done:       make(chan struct{}),
 	}
 }
 
-// OnlineCount 返回当前房间在线人数。
 func (r *Room) OnlineCount() int {
 	return int(r.count.Load())
 }
 
+// Run 是房间的主事件循环，由独立 goroutine 运行。
+// 所有对 r.clients 的读写都在此 goroutine 中完成。
+// 退出时关闭 r.done 通知外部。
 func (r *Room) Run() {
+	defer close(r.done)
+
+	// 停止时排空 broadcast 并清理客户端
+	defer func() {
+		// 排空剩余的 broadcast 消息
+		for {
+			select {
+			case msg := <-r.broadcast:
+				r.broadcastToClients(msg)
+			default:
+				goto drainDone
+			}
+		}
+	drainDone:
+
+		// 关闭所有客户端的 send channel，让 writePump 自然发送关闭帧后退出
+		for client := range r.clients {
+			delete(r.clients, client)
+			close(client.send)
+		}
+		r.count.Store(0)
+	}()
+
 	for {
 		select {
 		case client := <-r.register:
 			r.clients[client] = true
 			r.count.Add(1)
-			slog.Debug("WS 客户端加入房间",
-				"room_id", r.ID,
-				"online", r.count.Load(),
-			)
 
 		case client := <-r.unregister:
 			if _, ok := r.clients[client]; ok {
 				delete(r.clients, client)
 				r.count.Add(-1)
 				close(client.send)
-				online := r.count.Load()
-				slog.Debug("WS 客户端离开房间",
-					"room_id", r.ID,
-					"online", online,
-				)
-				if online == 0 {
+				if r.count.Load() == 0 {
 					r.hub.RemoveRoomIfSame(r.ID, r)
-					slog.Info("房间已空，已关闭", "room_id", r.ID)
 				}
 			}
 
 		case msg := <-r.broadcast:
-			for client := range r.clients {
-				select {
-				case client.send <- msg:
-				default:
-					//客户端缓冲区满了, 踢掉
-					slog.Warn("慢客户端被踢出",
-						"room_id", r.ID,
-						"remote", client.conn.RemoteAddr().String(),
-					)
-					close(client.send)
-					delete(r.clients, client)
-					r.count.Add(-1)
-				}
-			}
+			r.broadcastToClients(msg)
 			if len(r.clients) == 0 {
-				// 广播后无人接收，关闭房间
 				r.hub.RemoveRoomIfSame(r.ID, r)
-				slog.Info("广播后房间已空，已关闭", "room_id", r.ID)
 			}
 
 		case <-r.stop:
-			// 优雅关闭：给所有客户端发关闭帧，然后退出
-			for client := range r.clients {
-				client.conn.WriteMessage(websocket.CloseMessage,
-					websocket.FormatCloseMessage(websocket.CloseNormalClosure,
-						"server shutting down"))
-				delete(r.clients, client)
-				close(client.send)
-			}
-			r.count.Store(0)
-			slog.Info("房间已关闭", "room_id", r.ID)
 			return
 		}
 	}
 }
 
+// broadcastToClients 将消息投递给房间内所有客户端。
+// 必须在 Room.Run goroutine 中调用。
+func (r *Room) broadcastToClients(msg []byte) {
+	for client := range r.clients {
+		select {
+		case client.send <- msg:
+			metrics.WSClientDeliveries.Inc()
+		default:
+			metrics.WSSlowKicks.Inc()
+			slog.Warn("慢客户端被踢出",
+				"room_id", r.ID,
+				"client_ip", client.clientIP,
+			)
+			close(client.send)
+			delete(r.clients, client)
+			r.count.Add(-1)
+			client.releaseConn()
+		}
+	}
+}
+
 // Broadcast 向房间内所有客户端广播消息。
-// 非阻塞实现：channel 满了直接丢弃，防止 HTTP 请求被广播拖慢。
-// 公开方法，供 handler/service 层调用。
+// 非阻塞实现：channel 满了直接丢弃。
 func (r *Room) Broadcast(msg []byte) {
 	select {
 	case r.broadcast <- msg:
@@ -149,27 +152,55 @@ func (r *Room) Broadcast(msg []byte) {
 			"room_id", r.ID,
 			"buf_size", cap(r.broadcast),
 		)
+		metrics.WSBroadcastDrops.Inc()
 	}
 }
 
-// Hub是一个"房间管理器"
-// 不直接持有客户端,而是持有map[string]*Room
-type Hub struct {
-	rooms        map[string]*Room
-	mu           sync.RWMutex //保护rooms map的并发访问
-	cfg          Config       // 配置（创建后不可变）
-	shutdownOnce sync.Once    // 保证 Shutdown 只执行一次
-
-	redisClient *redisclient.Client // Redis 跨实例广播客户端，nil = 不使用
-	redisCancel context.CancelFunc  // 用于停止 redisSubscribeLoop goroutine
-	wg          sync.WaitGroup      // 等待后台 goroutine 退出（Redis 订阅）
-
-	connCounter map[string]int64 // 每 IP 连接数
-	counterMu   sync.Mutex       // 保护 connCounter
+// SignalStop 发起房间停止信号，幂等安全。
+func (r *Room) SignalStop() {
+	r.stopMu.Do(func() {
+		close(r.stop)
+	})
 }
 
-// NewHub 使用默认配置创建 Hub。
-// 等价于 NewHubWithConfig(默认配置, nil)。
+// WaitDone 等待房间 Run goroutine 退出，最多等待 timeout 时长。
+func (r *Room) WaitDone(timeout time.Duration) bool {
+	select {
+	case <-r.done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
+
+type redisPublishJob struct {
+	roomID string
+	data   []byte
+}
+
+// Hub 是房间管理器，持有 map[string]*Room。
+type Hub struct {
+	rooms        map[string]*Room
+	mu           sync.RWMutex
+	cfg          Config
+	shutdownOnce sync.Once
+
+	redisClient     *redisclient.Client
+	redisConfigured bool
+	redisCancel     context.CancelFunc
+	wg              sync.WaitGroup
+
+	redisPublishChan chan redisPublishJob
+	redisPubDrops    atomic.Int64
+
+	connCounter   map[string]int64
+	counterMu     sync.Mutex
+	roomConnCount map[string]int64
+
+	checkOrigin  func(r *http.Request) bool
+	shuttingDown atomic.Bool
+}
+
 func NewHub() *Hub {
 	return NewHubWithConfig(Config{
 		WriteWaitSeconds:    defaultWriteWaitSeconds,
@@ -180,59 +211,101 @@ func NewHub() *Hub {
 	}, nil)
 }
 
-// NewHubWithConfig 使用指定配置创建 Hub。
-// redisClient 为 nil 时回退到纯内存广播（向后兼容）。
+const redisPubChanSize = 256
+
 func NewHubWithConfig(cfg Config, redisClient *redisclient.Client) *Hub {
 	h := &Hub{
-		rooms:       make(map[string]*Room),
-		cfg:         cfg,
-		redisClient: redisClient,
-		connCounter: make(map[string]int64),
+		rooms:         make(map[string]*Room),
+		cfg:           cfg,
+		redisClient:   redisClient,
+		connCounter:   make(map[string]int64),
+		roomConnCount: make(map[string]int64),
+		checkOrigin:   buildCheckOrigin(cfg.AllowedOrigins),
 	}
 
-	// 如果有 Redis 客户端，启动跨实例广播订阅循环
 	if redisClient != nil {
+		h.redisConfigured = true
+		h.redisPublishChan = make(chan redisPublishJob, redisPubChanSize)
 		ctx, cancel := context.WithCancel(context.Background())
 		h.redisCancel = cancel
-		h.wg.Add(1)
+		h.wg.Add(2)
 		go h.redisSubscribeLoop(ctx)
+		go h.redisPublishLoop(ctx)
 	}
 
 	return h
 }
 
 // BroadcastToRoom 向指定房间广播消息，同时通过 Redis 跨实例广播。
-// 这是 service 层调用的统一入口——替代直接调用 GetOrCreateRoom(..).Broadcast()。
-//
-// 流程：
-//  1. 本地广播（本机内存的客户端）
-//  2. 如果有 Redis 配置，也发布一份到 Redis（其他实例会收到并广播）
 func (h *Hub) BroadcastToRoom(roomID string, data []byte) {
-	// 1. 本地广播（与之前一样）
+	if h.shuttingDown.Load() {
+		return
+	}
 	room := h.GetOrCreateRoom(roomID)
+	if room == nil {
+		return
+	}
 	room.Broadcast(data)
 
-	// 2. 跨实例广播（通过 Redis Pub/Sub，2 秒超时）
-	if h.redisClient != nil {
-		pubCtx, pubCancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer pubCancel()
-		if err := h.redisClient.Publish(pubCtx, roomID, data); err != nil {
-			slog.Error("Redis 发布失败",
+	if h.redisPublishChan != nil {
+		select {
+		case h.redisPublishChan <- redisPublishJob{roomID: roomID, data: data}:
+		default:
+			drops := h.redisPubDrops.Add(1)
+			metrics.RedisPublishTotal.WithLabelValues("dropped").Inc()
+			slog.Warn("Redis 发布队列已满，丢弃跨实例广播",
 				"room_id", roomID,
-				"error", err,
+				"total_drops", drops,
 			)
 		}
 	}
 }
 
-// redisSubscribeLoop 在后台 goroutine 中接收 Redis 跨实例广播消息。
-// 收到消息后找到对应的房间，做本地广播。
-// ctx 取消时（Hub.Shutdown 时），goroutine 退出。
-func (h *Hub) redisSubscribeLoop(ctx context.Context) {
-	ch := h.redisClient.Subscribe(ctx)
+func (h *Hub) redisPublishLoop(ctx context.Context) {
 	defer h.wg.Done()
+	metrics.RedisPubQueueCap.Set(float64(redisPubChanSize))
+	metrics.RedisPubQueueLen.Set(0)
+
+	for {
+		select {
+		case job := <-h.redisPublishChan:
+			metrics.RedisPubQueueLen.Set(float64(len(h.redisPublishChan)))
+			h.publishToRedis(job.roomID, job.data)
+
+		case <-ctx.Done():
+			slog.Info("Redis 发布循环开始排空", "remaining", len(h.redisPublishChan))
+			for {
+				select {
+				case job := <-h.redisPublishChan:
+					metrics.RedisPubQueueLen.Set(float64(len(h.redisPublishChan)))
+					drainCtx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+					h.redisClient.Publish(drainCtx, job.roomID, job.data)
+					cancel()
+				default:
+					metrics.RedisPubQueueLen.Set(0)
+					slog.Info("Redis 发布队列已排空")
+					return
+				}
+			}
+		}
+	}
+}
+
+func (h *Hub) publishToRedis(roomID string, data []byte) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := h.redisClient.Publish(ctx, roomID, data); err != nil {
+		slog.Error("Redis 发布失败",
+			"room_id", roomID,
+			"error", err,
+		)
+	}
+}
+
+func (h *Hub) redisSubscribeLoop(ctx context.Context) {
+	defer h.wg.Done()
+	ch := h.redisClient.StartSubscription(ctx)
 	for msg := range ch {
-		// 只广播到本机已有客户端的房间，不存在的房间不创建
 		room := h.GetRoom(msg.RoomID)
 		if room == nil {
 			continue
@@ -242,8 +315,6 @@ func (h *Hub) redisSubscribeLoop(ctx context.Context) {
 	slog.Info("Redis 订阅循环已退出")
 }
 
-// 以下是 Client 用到的便利方法，从 cfg 中取值转换 time.Duration。
-
 func (h *Hub) writeWait() time.Duration {
 	return time.Duration(h.cfg.WriteWaitSeconds) * time.Second
 }
@@ -252,7 +323,6 @@ func (h *Hub) pongWait() time.Duration {
 	return time.Duration(h.cfg.PongWaitSeconds) * time.Second
 }
 
-// pingPeriod 是 pongWait 的 90%（留有余量）。
 func (h *Hub) pingPeriod() time.Duration {
 	return h.pongWait() * 9 / 10
 }
@@ -265,112 +335,191 @@ func (h *Hub) sendBufferSize() int {
 	return h.cfg.SendBufferSize
 }
 
-// connInc 增加某 IP 的连接计数，返回增加后的值。用于每 IP 连接数限制。
-func (h *Hub) connInc(ip string) int64 {
+// TryAcquireConn 尝试预留一个连接名额。
+// 返回一个 release 函数，调用方必须在 Upgrade 失败时调用 release() 回滚预留。
+func (h *Hub) TryAcquireConn(ip string, roomID string) (release func(), ok bool) {
 	h.counterMu.Lock()
 	defer h.counterMu.Unlock()
-	h.connCounter[ip]++
-	return h.connCounter[ip]
-}
 
-// connDec 减少某 IP 的连接计数。
-func (h *Hub) connDec(ip string) {
-	h.counterMu.Lock()
-	defer h.counterMu.Unlock()
-	h.connCounter[ip]--
-	if h.connCounter[ip] <= 0 {
-		delete(h.connCounter, ip)
-	}
-}
-
-// CheckConnLimits 检查连接是否超过限制。
-// 返回 (允许连接?, 拒绝原因)。
-func (h *Hub) CheckConnLimits(ip string, roomID string) (bool, string) {
 	if h.cfg.MaxConnPerIP > 0 {
-		h.counterMu.Lock()
-		cur := h.connCounter[ip]
-		h.counterMu.Unlock()
-		if cur >= int64(h.cfg.MaxConnPerIP) {
-			return false, fmt.Sprintf("每 IP 连接数限制 %d", h.cfg.MaxConnPerIP)
+		if h.connCounter[ip] >= int64(h.cfg.MaxConnPerIP) {
+			metrics.WSConnRejects.WithLabelValues("per_ip").Inc()
+			return nil, false
 		}
 	}
 
 	if h.cfg.MaxConnPerRoom > 0 {
-		room := h.GetRoom(roomID)
-		if room != nil && room.OnlineCount() >= h.cfg.MaxConnPerRoom {
-			return false, fmt.Sprintf("房间连接数限制 %d", h.cfg.MaxConnPerRoom)
+		current := h.roomConnCount[roomID]
+		if current >= int64(h.cfg.MaxConnPerRoom) {
+			metrics.WSConnRejects.WithLabelValues("per_room").Inc()
+			return nil, false
 		}
 	}
 
-	return true, ""
+	h.connCounter[ip]++
+	h.roomConnCount[roomID]++
+	metrics.WSConnections.Inc()
+	metrics.WSConnTotal.Inc()
+
+	released := atomic.Bool{}
+	return func() {
+		if !released.CompareAndSwap(false, true) {
+			return
+		}
+		h.counterMu.Lock()
+		defer h.counterMu.Unlock()
+		h.connCounter[ip]--
+		if h.connCounter[ip] <= 0 {
+			delete(h.connCounter, ip)
+		}
+		h.roomConnCount[roomID]--
+		if h.roomConnCount[roomID] <= 0 {
+			delete(h.roomConnCount, roomID)
+		}
+		metrics.WSConnections.Dec()
+	}, true
 }
 
-// GetRoom 返回指定房间的指针，房间不存在时返回 nil。
-// 只读查询，不会创建新房间。用于 Redis 订阅循环——不存在的房间不广播。
+// connReleaseAll 供 Client 在断开连接时释放 IP 和房间两类计数。
+func (h *Hub) connReleaseAll(clientIP string, roomID string) {
+	h.counterMu.Lock()
+	defer h.counterMu.Unlock()
+	h.connCounter[clientIP]--
+	if h.connCounter[clientIP] <= 0 {
+		delete(h.connCounter, clientIP)
+	}
+	h.roomConnCount[roomID]--
+	if h.roomConnCount[roomID] <= 0 {
+		delete(h.roomConnCount, roomID)
+	}
+	metrics.WSConnections.Dec()
+}
+
 func (h *Hub) GetRoom(roomID string) *Room {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return h.rooms[roomID]
 }
 
+// GetOrCreateRoom 返回指定房间，不存在时创建。
+// 关闭期间返回 nil。
 func (h *Hub) GetOrCreateRoom(roomID string) *Room {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+
+	if h.shuttingDown.Load() {
+		return nil
+	}
 
 	if room, ok := h.rooms[roomID]; ok {
 		return room
 	}
 
-	//房间不存在, 新建并且启动它的Run goroutine
 	room := NewRoom(roomID, h)
 	go room.Run()
 	h.rooms[roomID] = room
+	metrics.WSActiveRooms.Set(float64(len(h.rooms)))
 	slog.Info("创建新房间", "room_id", roomID)
 	return room
 }
 
-// RemoveRoomIfSame 移除 roomID 对应的房间，前提是它和传入的 room 是同一个对象。
-// 防止并发场景：判断为空 → 新客户端同时创建新房间 → 误删新房间。
-// 移除后关闭 room.stop，让 Room.Run() goroutine 安全退出。
 func (h *Hub) RemoveRoomIfSame(roomID string, room *Room) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if existing, ok := h.rooms[roomID]; ok && existing == room {
 		delete(h.rooms, roomID)
-		close(room.stop)
-		slog.Debug("房间 goroutine 已退出", "room_id", roomID)
+		room.SignalStop()
+		metrics.WSActiveRooms.Set(float64(len(h.rooms)))
 	}
 }
 
-// Shutdown 优雅关闭所有房间。
-// 先取消 Redis 订阅循环，再关闭房间。
-// sync.Once 保证即使多次调用也只执行一次。
+// Shutdown 优雅关闭所有房间和 Redis 后台 goroutine。
 func (h *Hub) Shutdown() {
 	h.shutdownOnce.Do(func() {
 		slog.Info("WebSocket Hub 开始关闭...")
+		h.shuttingDown.Store(true)
 
-		// 先停止 Redis 订阅循环，不再接收跨实例广播
+		// 1. 停止 Redis 后台 goroutine
 		if h.redisCancel != nil {
 			h.redisCancel()
-			h.wg.Wait() // 等待 redisSubscribeLoop goroutine 确实退出
+			waitCh := make(chan struct{})
+			go func() {
+				h.wg.Wait()
+				close(waitCh)
+			}()
+			select {
+			case <-waitCh:
+				slog.Info("Redis 后台 goroutine 已退出")
+			case <-time.After(5 * time.Second):
+				slog.Warn("Redis 后台 goroutine 退出超时，强制关闭")
+			}
 		}
 
+		// 2. 向所有房间发停止信号
 		h.mu.Lock()
-		defer h.mu.Unlock()
 		for _, room := range h.rooms {
-			close(room.stop)
+			room.SignalStop()
 		}
+		h.mu.Unlock()
+
+		// 3. 等待所有房间 goroutine 退出（总超时）
+		h.mu.RLock()
+		rooms := make([]*Room, 0, len(h.rooms))
+		for _, room := range h.rooms {
+			rooms = append(rooms, room)
+		}
+		h.mu.RUnlock()
+
+		allDone := make(chan struct{})
+		go func() {
+			for _, room := range rooms {
+				<-room.done
+			}
+			close(allDone)
+		}()
+		select {
+		case <-allDone:
+			slog.Info("所有房间 goroutine 已退出")
+		case <-time.After(10 * time.Second):
+			slog.Warn("部分房间 goroutine 退出超时")
+		}
+
+		// 4. 清空 rooms map
+		h.mu.Lock()
 		h.rooms = make(map[string]*Room)
+		h.mu.Unlock()
+		metrics.WSActiveRooms.Set(0)
+
 		slog.Info("WebSocket Hub 已关闭")
 	})
 }
 
-// ActiveRooms 返回当前所有活跃房间的 ID 列表。
-// 将来直播主页要用。
+func (h *Hub) HasRedisConfig() bool {
+	return h.redisConfigured
+}
+
+func (h *Hub) HasRedis() bool {
+	return h.redisClient != nil
+}
+
+// MarkRedisConfigured 供 main.go 在 Redis 地址已配置但连接失败时调用，
+// 使 Readyz 能报告 degraded 而非 disabled。
+func (h *Hub) MarkRedisConfigured() {
+	h.redisConfigured = true
+}
+
+func (h *Hub) PingRedis() bool {
+	if h.redisClient == nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	return h.redisClient.Ping(ctx) == nil
+}
+
 func (h *Hub) ActiveRooms() []string {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-
 	ids := make([]string, 0, len(h.rooms))
 	for id := range h.rooms {
 		ids = append(ids, id)

@@ -12,35 +12,28 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/1012-Penn/DanmakuFlow/metrics"
 	"github.com/1012-Penn/DanmakuFlow/model"
 	"github.com/1012-Penn/DanmakuFlow/store"
 	"github.com/1012-Penn/DanmakuFlow/websocket"
 )
 
-// CreateDanmakuRequest 是创建弹幕的通用请求结构。
-// HTTP 和 WebSocket 都使用这个结构，但解析方式不同：
-//   - HTTP:  Gin 的 ShouldBindJSON 把请求体直接绑定到这里
-//   - WebSocket: readPump 收到原始 JSON 字节，内部 Unmarshal 到这里
-//
-// Type 和 FontSize 参照 Bilibili 弹幕协议设计。
-//
-//	Type: "scroll"（滚动）/ "top"（顶部）/ "bottom"（底部）/ "reverse"（逆向）
-//	FontSize: 25（普通）/ 18（小）
 type CreateDanmakuRequest struct {
-	Content  string `json:"content"`
-	UserID   string `json:"user_id"`
-	RoomID   string `json:"room_id"`
-	Color    string `json:"color"`
-	Type     string `json:"type"`
-	FontSize int    `json:"font_size"`
+	Content   string `json:"content"`
+	UserID    string `json:"user_id"`
+	RoomID    string `json:"room_id"`
+	Color     string `json:"color"`
+	Type      string `json:"type"`
+	FontSize  int    `json:"font_size"`
+	RequestID string `json:"request_id"`
 }
 
 // rateLimiter 基于内存的每用户频率限制。
-// 记录每个用户最后一次发消息的时间，如果间隔小于阈值则拒绝。
 type rateLimiter struct {
-	mu       sync.Mutex
-	lastTime map[string]time.Time
-	interval time.Duration // 最小发送间隔（0 = 不限制）
+	mu             sync.Mutex
+	lastTime       map[string]time.Time
+	interval       time.Duration
+	lastCleanCount int
 }
 
 func newRateLimiter(msgsPerSec float64) *rateLimiter {
@@ -54,172 +47,248 @@ func newRateLimiter(msgsPerSec float64) *rateLimiter {
 	}
 }
 
-// Allow 检查 userID 是否允许发送。允许返回 true，拒绝返回 false。
 func (rl *rateLimiter) Allow(userID string) bool {
 	if rl.interval <= 0 {
-		return true // 不限制
+		return true
 	}
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 	last, ok := rl.lastTime[userID]
 	now := time.Now()
 	if ok && now.Sub(last) < rl.interval {
-		return false // 发送太快
+		return false
 	}
 	rl.lastTime[userID] = now
 
-	// 定期清理（每 1000 次检查清理一次，防止 map 无限膨胀）
-	if len(rl.lastTime) > 1000 {
-		go rl.cleanup()
+	if size := len(rl.lastTime); size > 1000 && size-rl.lastCleanCount > 1000 {
+		threshold := now.Add(-rl.interval * 2)
+		for uid, t := range rl.lastTime {
+			if t.Before(threshold) {
+				delete(rl.lastTime, uid)
+			}
+		}
+		rl.lastCleanCount = len(rl.lastTime)
 	}
 	return true
 }
 
-// cleanup 清理超过 2 倍间隔未活动的用户记录。
-func (rl *rateLimiter) cleanup() {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	threshold := time.Now().Add(-rl.interval * 2)
-	for uid, t := range rl.lastTime {
-		if t.Before(threshold) {
-			delete(rl.lastTime, uid)
-		}
-	}
-}
-
 // DanmakuService 是弹幕的业务层。
-// 职责：创建弹幕 → 存库 + 广播，保证两者一定同时发生。
-// 无论消息来自 HTTP 还是 WebSocket，都经过这里统一处理。
 //
-// 写库采用异步 channel 模式：createAndBroadcast 将弹幕写入
-// danmakuChan 后立即返回，不阻塞 WS 广播。后台 consumer goroutine
-// 从 channel 读出并调用 store.Add。这样数据库写入慢不会拖慢弹幕推送。
+// 状态机：
+//   - 正常运行时 accepting=true，创建弹幕时登记 inflight，完成后释放
+//   - Shutdown 先将 accepting=false，禁止新请求
+//   - 等待所有 inflight 完成
+//   - 然后关闭 danmakuChan（确保 no send on closed channel）
+//   - 最后等待 consumer 排空
 type DanmakuService struct {
 	store       store.Store
 	hub         *websocket.Hub
-	danmakuChan chan model.Danmaku // 异步写库通道，nil = 同步写
-	wg          sync.WaitGroup     // 等待 consumer 将剩余消息写入存储
-	closed      atomic.Bool        // 标记是否已关闭（防止重复关闭 danmakuChan）
-	rateLimiter *rateLimiter       // 频率限制器，nil = 不限制
+	danmakuChan chan model.Danmaku
+	wg          sync.WaitGroup
+	closed      atomic.Bool
+	rateLimiter *rateLimiter
+	hasDSN      bool
+
+	// 接受/在途状态机
+	// 使用 atomic.Int64 避免 sync.WaitGroup.Add 与 Wait 的非法并发
+	accepting atomic.Bool
+	inflight  atomic.Int64
 }
 
-// NewDanmakuService 创建一个 DanmakuService。
-// asyncBufferSize > 0 时启用异步写库；= 0 时为同步写（测试场景用）。
-// msgsPerSec > 0 时启用每用户频率限制。
-func NewDanmakuService(s store.Store, hub *websocket.Hub, asyncBufferSize int, msgsPerSec float64) *DanmakuService {
+func NewDanmakuService(s store.Store, hub *websocket.Hub, asyncBufferSize int, msgsPerSec float64, hasDSN bool) *DanmakuService {
 	svc := &DanmakuService{
 		store:       s,
 		hub:         hub,
 		danmakuChan: nil,
 		rateLimiter: newRateLimiter(msgsPerSec),
+		hasDSN:      hasDSN,
 	}
+	svc.accepting.Store(true)
 	if asyncBufferSize > 0 {
 		svc.danmakuChan = make(chan model.Danmaku, asyncBufferSize)
-		svc.wg.Add(1) // 启动前 Add，防止 Shutdown 的 Wait 先执行
+		metrics.AsyncChanCap.Set(float64(asyncBufferSize))
+		svc.wg.Add(1)
 		go svc.danmakuConsumer()
+		go svc.updateAsyncChanLen()
 	}
 	return svc
 }
 
 // danmakuConsumer 从 channel 中取出弹幕，写入 store。
-// 在独立的 goroutine 中运行，不阻塞主流程。
-// channel 关闭后 for-range 退出，标记 WaitGroup 完成。
 func (s *DanmakuService) danmakuConsumer() {
 	defer s.wg.Done()
 	for dm := range s.danmakuChan {
-		s.store.Add(dm)
+		writeStart := time.Now()
+		if err := s.store.Add(dm); err != nil {
+			slog.Error("存储写入失败",
+				"dm_id", dm.ID,
+				"room_id", dm.RoomID,
+				"error", err,
+			)
+			metrics.StoreWriteTotal.WithLabelValues("error").Inc()
+		} else {
+			metrics.StoreWriteTotal.WithLabelValues("success").Inc()
+		}
+		metrics.StoreWriteLatency.Observe(time.Since(writeStart).Seconds())
 	}
 }
 
-// HandleMessage 供 WebSocket Client 调用。
-// data 是浏览器发来的原始 JSON 字节，内部解析后走统一流程。
-// WS 场景下校验失败不会通知客户端（WebSocket 无请求-响应概念），仅记录日志。
-func (s *DanmakuService) HandleMessage(roomID string, data []byte) {
+// HandleMessage 处理 WebSocket 收到的消息，返回 HandleResult。
+// 支持两种格式：
+//   - 新信封格式：{"type":"danmaku","payload":{...}}
+//   - 旧裸格式：{"content":"...","user_id":"...","request_id":"..."}
+func (s *DanmakuService) HandleMessage(roomID string, data []byte) model.HandleResult {
+	// 尝试解析为信封格式
+	var env model.MessageEnvelope
+	if err := json.Unmarshal(data, &env); err == nil && env.Type == model.MsgTypeDanmaku {
+		data = env.Payload
+	}
+
 	var req CreateDanmakuRequest
 	if err := json.Unmarshal(data, &req); err != nil {
-		return
+		return model.HandleResult{
+			OK:        false,
+			ErrorCode: "parse_error",
+			Reason:    "invalid JSON: " + err.Error(),
+		}
 	}
 	req.RoomID = roomID
-	if _, err := s.createAndBroadcast(req); err != nil {
+
+	dm, err := s.createAndBroadcast(req)
+	if err != nil {
 		slog.Warn("WS 弹幕校验不通过",
 			"room_id", roomID,
 			"error", err,
 		)
+		return model.HandleResult{
+			RequestID: req.RequestID,
+			OK:        false,
+			ErrorCode: "validation_error",
+			Reason:    err.Error(),
+		}
+	}
+
+	// 确定持久化状态
+	persistence := "persisted"
+	if s.danmakuChan != nil {
+		persistence = "buffered"
+	}
+
+	dataBytes, _ := json.Marshal(dm)
+	return model.HandleResult{
+		RequestID:   req.RequestID,
+		MessageID:   dm.ID,
+		OK:          true,
+		Persistence: persistence,
+		Data:        dataBytes,
 	}
 }
 
-// CreateDanmaku 供 HTTP Handler 调用。
-// 返回完整的 Danmaku 对象，供 handler 序列化为 HTTP 响应。
-// 校验失败时返回 error，由 handler 层转为 400 响应。
 func (s *DanmakuService) CreateDanmaku(req CreateDanmakuRequest) (model.Danmaku, error) {
 	return s.createAndBroadcast(req)
 }
 
-// ListByRoom 返回指定房间的弹幕历史。
-// 由 HTTP Handler 调用，供前端拉取历史弹幕。
 func (s *DanmakuService) ListByRoom(roomID string, limit int) []model.Danmaku {
 	return s.store.ListByRoom(roomID, limit)
 }
 
-// validTypes 是 Bilibili 弹幕支持的四种类型。
 var validTypes = map[string]bool{
-	"scroll":  true,
-	"top":     true,
-	"bottom":  true,
-	"reverse": true,
+	"scroll": true, "top": true, "bottom": true, "reverse": true,
 }
 
-// validate 校验 CreateDanmakuRequest 的字段合法性。
-// 校验规则对标 Bilibili 弹幕协议，兼顾基础防滥用。
+func (s *DanmakuService) HasStoreDSN() bool {
+	return s.hasDSN
+}
+
+func (s *DanmakuService) PingStore() bool {
+	return s.store.Ping()
+}
+
+// QueryHistory 查询指定房间在 sinceTime+lastID 之后的弹幕历史。
+func (s *DanmakuService) QueryHistory(roomID string, sinceTime time.Time, lastID string, limit int) ([]model.Danmaku, error) {
+	return s.store.ListSince(roomID, sinceTime, lastID, limit)
+}
+
 func (req CreateDanmakuRequest) validate() error {
 	if strings.TrimSpace(req.Content) == "" {
-		return errors.New("content 不能为空")
+		return errors.New("content cannot be empty")
 	}
 	if len(req.Content) > 500 {
-		return errors.New("content 长度不能超过 500 字")
+		return errors.New("content cannot exceed 500 characters")
 	}
 	if strings.TrimSpace(req.UserID) == "" {
-		return errors.New("user_id 不能为空")
+		return errors.New("user_id cannot be empty")
 	}
 	if strings.TrimSpace(req.RoomID) == "" {
-		return errors.New("room_id 不能为空")
+		return errors.New("room_id cannot be empty")
 	}
 	if req.Type != "" && !validTypes[req.Type] {
-		return errors.New("type 必须是 scroll/top/bottom/reverse 之一")
+		return errors.New("type must be one of scroll/top/bottom/reverse")
 	}
 	if req.FontSize != 0 && req.FontSize != 18 && req.FontSize != 25 && req.FontSize != 36 {
-		return errors.New("font_size 必须是 18/25/36 之一")
+		return errors.New("font_size must be 18/25/36")
 	}
 	if req.Color != "" && !strings.HasPrefix(req.Color, "#") {
-		return errors.New("color 必须以 # 开头，例如 #FFFFFF")
+		return errors.New("color must start with #, e.g. #FFFFFF")
 	}
 	return nil
 }
 
-// Shutdown 优雅关闭：停止接收新弹幕 → 关闭 channel → 等待 consumer 排空。
-// 确保所有已入 channel 的弹幕在返回前都已写入存储。
-// 如果设置了超时的 ctx 在排空前超时，返回 ctx.Err()，调用方应据此决策。
-func (s *DanmakuService) Shutdown(ctx context.Context) error {
-	if !s.closed.CompareAndSwap(false, true) {
-		return nil // 已关闭，防止重复 close(channel)
-	}
-
+func (s *DanmakuService) updateAsyncChanLen() {
 	if s.danmakuChan == nil {
-		return nil // 同步模式，无需 drain
+		return
 	}
+	for {
+		if s.closed.Load() {
+			metrics.AsyncChanLen.Set(0)
+			return
+		}
+		metrics.AsyncChanLen.Set(float64(len(s.danmakuChan)))
+		time.Sleep(time.Second)
+	}
+}
 
-	// 关闭 channel，danmakuConsumer 的 for-range 会退出
+// Shutdown 优雅关闭。
+// 必须先禁止新请求，再等待在途请求完成，然后关闭并排空 danmakuChan。
+func (s *DanmakuService) Shutdown(ctx context.Context) error {
+	// 1. 禁止新请求
+	s.accepting.Store(false)
+
+	// 2. 等待所有在途业务请求完成
+	pollCtx, pollCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer pollCancel()
+	for s.inflight.Load() > 0 {
+		select {
+		case <-pollCtx.Done():
+			slog.Warn("等待在途请求超时",
+				"remaining", s.inflight.Load(),
+				"error", pollCtx.Err(),
+			)
+			goto afterWait
+		default:
+			time.Sleep(time.Microsecond)
+		}
+	}
+	slog.Info("所有在途请求已完成")
+afterWait:
+
+	// 3. 关闭 danmakuChan（此时保证无新写入）
+	if !s.closed.CompareAndSwap(false, true) {
+		return nil
+	}
+	if s.danmakuChan == nil {
+		return nil
+	}
 	close(s.danmakuChan)
 
-	// 等待 consumer 消费完剩余消息，或超时
-	done := make(chan struct{})
+	// 4. 等待 consumer 排空
+	drainDone := make(chan struct{})
 	go func() {
 		s.wg.Wait()
-		close(done)
+		close(drainDone)
 	}()
-
 	select {
-	case <-done:
+	case <-drainDone:
 		slog.Info("异步写入通道已排空")
 		return nil
 	case <-ctx.Done():
@@ -228,35 +297,32 @@ func (s *DanmakuService) Shutdown(ctx context.Context) error {
 	}
 }
 
-// createAndBroadcast 是内部核心方法：构建 Danmaku → 存库 → 广播。
-// HandleMessage 和 CreateDanmaku 最终都调它，保证一致的行为。
-//
-// 写库策略：
-//   - 异步模式（danmakuChan != nil）：弹幕入 channel → 立即广播 → 返回
-//   - 同步模式（danmakuChan == nil）：先写库 → 再广播 → 返回（测试用）
+// createAndBroadcast 是内部核心方法。
+// 先登记 inflight 再检查 accepting，确保 Shutdown 不会漏掉在途请求。
 func (s *DanmakuService) createAndBroadcast(req CreateDanmakuRequest) (model.Danmaku, error) {
+	s.inflight.Add(1)
+	defer s.inflight.Add(-1)
+
+	if !s.accepting.Load() {
+		return model.Danmaku{}, errors.New("service is shutting down")
+	}
+
 	if err := req.validate(); err != nil {
 		return model.Danmaku{}, err
 	}
-	if s.closed.Load() {
-		return model.Danmaku{}, errors.New("服务已关闭，不再接收新弹幕")
-	}
 
-	// 频率限制
 	if s.rateLimiter != nil && !s.rateLimiter.Allow(req.UserID) {
-		return model.Danmaku{}, errors.New("发送频率过快，请稍后再试")
+		return model.Danmaku{}, errors.New("sending too fast, please wait")
 	}
 
 	color := req.Color
 	if color == "" {
 		color = "#ffffff"
 	}
-
 	dmType := req.Type
 	if dmType == "" {
 		dmType = "scroll"
 	}
-
 	fontSize := req.FontSize
 	if fontSize <= 0 {
 		fontSize = 25
@@ -273,26 +339,39 @@ func (s *DanmakuService) createAndBroadcast(req CreateDanmakuRequest) (model.Dan
 		UserID:    req.UserID,
 	}
 
-	// 异步写库：不阻塞广播
 	if s.danmakuChan != nil {
 		select {
 		case s.danmakuChan <- dm:
+			// 成功入队，metrics 在 consumer 中处理
 		default:
-			slog.Warn("异步写入通道已满, 丢弃弹幕",
+			slog.Warn("async write channel full, dropping danmaku",
 				"chan_cap", cap(s.danmakuChan),
 				"dm_id", dm.ID,
 				"room_id", dm.RoomID,
 			)
+			metrics.StoreWriteTotal.WithLabelValues("drop").Inc()
 		}
 	} else {
-		// 同步写库（测试等小流量场景）
-		s.store.Add(dm)
+		writeStart := time.Now()
+		if err := s.store.Add(dm); err != nil {
+			slog.Error("store write failed",
+				"dm_id", dm.ID,
+				"room_id", dm.RoomID,
+				"error", err,
+			)
+			metrics.StoreWriteTotal.WithLabelValues("error").Inc()
+		} else {
+			metrics.StoreWriteTotal.WithLabelValues("success").Inc()
+		}
+		metrics.StoreWriteLatency.Observe(time.Since(writeStart).Seconds())
 	}
 
-	// 广播始终同步（低延迟要求）
-	// BroadcastToRoom 负责本地广播 + Redis 跨实例广播
 	data, _ := json.Marshal(dm)
-	s.hub.BroadcastToRoom(req.RoomID, data)
+	bcastPayload, _ := json.Marshal(model.MessageEnvelope{
+		Type:    model.MsgTypeBroadcast,
+		Payload: data,
+	})
+	s.hub.BroadcastToRoom(req.RoomID, bcastPayload)
 
 	return dm, nil
 }

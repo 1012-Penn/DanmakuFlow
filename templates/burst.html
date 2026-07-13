@@ -124,22 +124,34 @@
     const colors = ['#ffffff','#e94560','#ff6b81','#ffa502','#2ed573','#1e90ff','#a29bfe','#fd79a8'];
 
     // ---- WebSocket ----
+    let reconnectTimer = null;
+    let reconnectAttempts = 0;
+
     function connect() {
         const room = roomInput.value.trim() || 'test';
-        ws = new WebSocket('ws://localhost:8080/ws?room=' + room);
+        const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const url = protocol + '//' + location.host + '/ws?room_id=' + encodeURIComponent(room);
+
+        ws = new WebSocket(url);
 
         ws.onopen = () => {
             statusEl.textContent = '✅ 已连接房间 ' + room;
             statusEl.className = 'status ok';
             burstBtn.textContent = '🎆 发射弹幕海！';
             burstBtn.disabled = false;
+            reconnectAttempts = 0;
+            if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
         };
         ws.onclose = () => {
-            statusEl.textContent = '❌ 已断开，3 秒后重连…';
+            statusEl.textContent = '❌ 已断开，重连中…';
             statusEl.className = 'status';
             burstBtn.textContent = '⏳ 重连中…';
             burstBtn.disabled = true;
-            setTimeout(connect, 3000);
+            reconnectAttempts++;
+            // 指数退避：1s, 2s, 4s... 最大 30s + jitter
+            const delay = Math.min(1000 * Math.pow(2, reconnectAttempts - 1), 30000);
+            const jittered = Math.round(delay * (0.8 + Math.random() * 0.4));
+            reconnectTimer = setTimeout(connect, jittered);
         };
     }
 
@@ -164,10 +176,13 @@
             }
 
             ws.send(JSON.stringify({
-                content: contents[sent % contents.length],
-                user_id: 'burst_' + sent,
-                color: colors[Math.floor(Math.random() * colors.length)],
-                type: typeArr[Math.floor(Math.random() * typeArr.length)],
+                type: 'danmaku',
+                payload: {
+                    content: contents[sent % contents.length],
+                    user_id: 'burst_' + sent,
+                    color: colors[Math.floor(Math.random() * colors.length)],
+                    type: typeArr[Math.floor(Math.random() * typeArr.length)],
+                }
             }));
             sent++;
             statusEl.textContent = '📨 已发射 ' + sent + ' / ' + count;

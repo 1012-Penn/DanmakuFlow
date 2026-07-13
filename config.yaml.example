@@ -3,6 +3,14 @@
 #   cp config.yaml.example config.yaml
 #
 # 所有字段均有内置默认值，未配置时可直接运行。
+#
+# 环境变量覆盖（优先级高于 YAML）：
+#   SERVER_PORT                — 服务端口
+#   STORE_DSN                  — MySQL DSN
+#   REDIS_ADDR                 — Redis 地址
+#   REDIS_INSTANCE_ID_PREFIX   — 实例 ID 前缀（空=自动生成 hostname-PID-UUID）
+#   LOG_LEVEL                  — 日志级别（debug/info/warn/error）
+#   LOG_FORMAT                 — 日志格式（text/json）
 
 server:
   port: 8080
@@ -34,9 +42,14 @@ store:
 redis:
   # Redis 地址，留空 = 不使用 Redis（回退纯内存广播）
   addr: "localhost:6379"
-  # 实例标识，用于跨实例消息去重。留空 = 自动获取主机名
+  # 实例标识前缀，用于跨实例消息去重。留空 = 自动生成 hostname-PID-UUID
   instance_id: ""
 
 rate_limit:
   # 每用户每秒可发送弹幕数，0=不限制
   messages_per_sec: 0
+
+pprof:
+  # 是否启用 pprof 性能分析（默认关闭）
+  # 开启后访问 /debug/pprof/ 可获取 CPU/内存/goroutine profile
+  enabled: false
