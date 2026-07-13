@@ -48,6 +48,19 @@ func ServeWs(hub *Hub, handler MessageHandler, c *gin.Context) {
 		}
 	}
 
+	// 可选 JWT 认证：如果提供了 token 且在 Hub 上配置了验证器，则验证用户身份
+	var userID, username string
+	if token := c.Query("token"); token != "" && hub.authValidator != nil {
+		claims, err := hub.authValidator.ValidateToken(token)
+		if err != nil {
+			slog.Warn("WebSocket token 验证失败", "error", err)
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
+			return
+		}
+		userID = claims.UserID
+		username = claims.Username
+	}
+
 	clientIP := c.ClientIP()
 	releaser, ok := hub.TryAcquireConn(clientIP, roomID)
 	if !ok {
@@ -73,6 +86,8 @@ func ServeWs(hub *Hub, handler MessageHandler, c *gin.Context) {
 	}
 
 	client := NewClient(hub, room, conn, handler, clientIP, releaser)
+	client.UserID = userID
+	client.Username = username
 
 	// 使用 select 向 room 注册，避免 Room 已停止时永久阻塞
 	select {

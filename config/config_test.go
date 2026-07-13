@@ -22,6 +22,7 @@ func TestApplyEnvOverrides(t *testing.T) {
 	os.Setenv("REDIS_INSTANCE_ID_PREFIX", "test-instance")
 	os.Setenv("LOG_LEVEL", "debug")
 	os.Setenv("LOG_FORMAT", "json")
+	os.Setenv("PPROF_ENABLED", "true")
 	defer func() {
 		os.Unsetenv("SERVER_PORT")
 		os.Unsetenv("STORE_DSN")
@@ -29,6 +30,7 @@ func TestApplyEnvOverrides(t *testing.T) {
 		os.Unsetenv("REDIS_INSTANCE_ID_PREFIX")
 		os.Unsetenv("LOG_LEVEL")
 		os.Unsetenv("LOG_FORMAT")
+		os.Unsetenv("PPROF_ENABLED")
 	}()
 
 	cfg := applyEnvOverrides(Default())
@@ -50,6 +52,9 @@ func TestApplyEnvOverrides(t *testing.T) {
 	}
 	if cfg.Log.Format != "json" {
 		t.Errorf("LOG_FORMAT override failed: got %q", cfg.Log.Format)
+	}
+	if !cfg.Pprof.Enabled {
+		t.Error("PPROF_ENABLED override failed")
 	}
 }
 

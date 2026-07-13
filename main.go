@@ -92,6 +92,7 @@ func main() {
 
 	// 选择存储后端：有 DSN 用 MySQL，否则用 MemoryStore
 	var s store.Store
+	var userStore store.UserStore
 	hasDSN := cfg.Store.DSN != ""
 	if hasDSN {
 		mysqlStore, err := store.NewMySQLStore(cfg.Store.DSN)
@@ -101,17 +102,48 @@ func main() {
 		}
 		s = mysqlStore
 		slog.Info("已连接 MySQL", "dsn", cfg.Store.DSN)
+
+		// 用户存储复用 MySQL 连接池
+		userStore, err = store.NewMySQLUserStore(mysqlStore.DB())
+		if err != nil {
+			slog.Error("用户表初始化失败", "error", err)
+			os.Exit(1)
+		}
+		slog.Info("用户存储（MySQL）已就绪")
 	} else {
 		s = store.New()
+		userStore = store.NewMemoryUserStore()
 		slog.Info("使用内存存储（MemoryStore）")
+		slog.Info("用户存储（Memory）已就绪")
 	}
 
 	// 组装依赖链
 	svc := service.NewDanmakuService(s, hub, cfg.Store.AsyncBufferSize, cfg.RateLimit.MessagesPerSec, hasDSN)
 	h := handler.New(svc, hub, cfg.Store.DefaultListLimit, instanceID)
 
+	// 创建认证服务
+	authSvc := service.NewAuthService(
+		userStore,
+		cfg.Auth.JWTSecret,
+		cfg.Auth.TokenExpiryHours,
+	)
+	authHandler := handler.NewAuthHandler(authSvc)
+
+	// 将认证服务注入 Hub（供 WebSocket 握手时认证）
+	hub.SetAuthValidator(authSvc)
+
 	// 注册所有路由
 	h.RegisterRoutes(r)
+
+	// 注册认证路由（公开：register/login，受 auth 中间件保护：me）
+	authHandler.RegisterAuthRoutes(r, authSvc)
+
+	// 为弹幕创建接口添加可选认证（有 token 用 token 中的 user_id，无 token 接受客户端传入）
+	room := r.Group("/api/room/:room_id")
+	room.Use(handler.OptionalAuthMiddleware(authSvc))
+	{
+		room.POST("/danmaku", h.Create)
+	}
 
 	// 条件注册 pprof 路由（默认关闭）
 	if cfg.Pprof.Enabled {

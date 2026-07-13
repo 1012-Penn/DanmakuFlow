@@ -50,7 +50,7 @@ func migrateWithLock(db *gorm.DB) error {
 		}
 
 		defer tx.Exec("SELECT RELEASE_LOCK(?)", migrationLockName)
-		if err := tx.AutoMigrate(&model.Danmaku{}); err != nil {
+		if err := tx.AutoMigrate(&model.Danmaku{}, &model.User{}); err != nil {
 			return fmt.Errorf("auto migrate: %w", err)
 		}
 		return nil
@@ -133,6 +133,11 @@ func (s *MySQLStore) configurePool() {
 	sqlDB.SetMaxOpenConns(25)
 	sqlDB.SetMaxIdleConns(10)
 	sqlDB.SetConnMaxLifetime(5 * time.Minute)
+}
+
+// DB 返回底层 *gorm.DB 实例，供 MySQLUserStore 复用连接池。
+func (s *MySQLStore) DB() *gorm.DB {
+	return s.db
 }
 
 // Close 关闭数据库连接。

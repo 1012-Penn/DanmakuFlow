@@ -53,3 +53,10 @@ pprof:
   # 是否启用 pprof 性能分析（默认关闭）
   # 开启后访问 /debug/pprof/ 可获取 CPU/内存/goroutine profile
   enabled: false
+
+auth:
+  # JWT 签名密钥，用于签发和验证用户 token
+  # 生产环境必须设置为一个足够长的随机字符串！
+  jwt_secret: ""
+  # Token 过期时间（小时），默认 72 小时
+  token_expiry_hours: 72

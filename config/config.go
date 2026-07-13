@@ -24,6 +24,16 @@ type Config struct {
 	Redis     RedisConfig     `yaml:"redis"`
 	RateLimit RateLimitConfig `yaml:"rate_limit"`
 	Pprof     PprofConfig     `yaml:"pprof"`
+	Auth      AuthConfig      `yaml:"auth"`
+}
+
+// AuthConfig 存放 JWT 认证相关配置。
+type AuthConfig struct {
+	// JWTSecret 是 JWT 签名的密钥。
+	// 空字符串时使用内置默认密钥（仅限开发环境）。
+	JWTSecret string `yaml:"jwt_secret"`
+	// TokenExpiryHours 是 JWT 过期时间（小时），默认 72。
+	TokenExpiryHours int `yaml:"token_expiry_hours"`
 }
 
 // ServerConfig 存放 HTTP 服务器相关配置。
@@ -121,6 +131,8 @@ func Load(path string) (*Config, error) {
 //	REDIS_INSTANCE_ID_PREFIX  — 实例 ID 前缀（空 = 自动生成）
 //	LOG_LEVEL                 — 日志级别（debug/info/warn/error）
 //	LOG_FORMAT                — 日志格式（text/json）
+//	PPROF_ENABLED             — 是否开启 pprof（true/false，默认 false）
+//	JWT_SECRET                — JWT 签名密钥（空=使用内置默认密钥）
 func applyEnvOverrides(cfg *Config) *Config {
 	if v := os.Getenv("SERVER_PORT"); v != "" {
 		if port, err := strconv.Atoi(v); err == nil {
@@ -141,6 +153,14 @@ func applyEnvOverrides(cfg *Config) *Config {
 	}
 	if v := os.Getenv("LOG_FORMAT"); v != "" {
 		cfg.Log.Format = v
+	}
+	if v := os.Getenv("PPROF_ENABLED"); v != "" {
+		if enabled, err := strconv.ParseBool(v); err == nil {
+			cfg.Pprof.Enabled = enabled
+		}
+	}
+	if v := os.Getenv("JWT_SECRET"); v != "" {
+		cfg.Auth.JWTSecret = v
 	}
 	return cfg
 }
@@ -177,6 +197,10 @@ func Default() *Config {
 		},
 		RateLimit: RateLimitConfig{
 			MessagesPerSec: 0, // 0 = 不限制
+		},
+		Auth: AuthConfig{
+			JWTSecret:        "", // 空 = main.go 使用内置默认密钥
+			TokenExpiryHours: 72, // 72 小时
 		},
 	}
 }

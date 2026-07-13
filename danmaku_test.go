@@ -39,6 +39,8 @@ func setupTest(t *testing.T) (*httptest.Server, *danmakuws.Hub) {
 	h := handler.New(svc, hub, 20, "test-instance")
 
 	h.RegisterRoutes(r)
+	// 在测试中注册 POST 路由（不通过 auth middleware，保持现有测试不变）
+	r.POST("/api/room/:room_id/danmaku", h.Create)
 	r.StaticFile("/", "./templates/index.html")
 
 	server := httptest.NewServer(r)

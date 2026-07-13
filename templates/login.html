@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>Danmaku - 登录</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: system-ui, sans-serif;
+            background: #1a1a2e; color: #fff;
+            display: flex; justify-content: center; align-items: center;
+            min-height: 100vh;
+        }
+        .card {
+            background: #16213e; border-radius: 12px;
+            padding: 40px; width: 400px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+        }
+        h1 { font-size: 24px; margin-bottom: 4px; }
+        .sub { font-size: 14px; color: #888; margin-bottom: 24px; }
+
+        .tabs { display: flex; gap: 0; margin-bottom: 24px; border-bottom: 1px solid #333; }
+        .tabs button {
+            flex: 1; padding: 10px; background: none; border: none;
+            color: #888; font-size: 15px; cursor: pointer;
+            border-bottom: 2px solid transparent; transition: .2s;
+        }
+        .tabs button.active { color: #e94560; border-bottom-color: #e94560; }
+
+        .form-group { margin-bottom: 16px; }
+        .form-group label { display: block; font-size: 13px; color: #aaa; margin-bottom: 4px; }
+        .form-group input {
+            width: 100%; padding: 10px 14px; border-radius: 6px; border: 1px solid #333;
+            background: #0f3460; color: #fff; font-size: 15px; outline: none;
+        }
+        .form-group input:focus { border-color: #e94560; }
+
+        .btn {
+            width: 100%; padding: 12px; font-size: 16px; font-weight: bold;
+            border: none; border-radius: 6px; cursor: pointer;
+            background: #e94560; color: #fff; transition: .2s;
+        }
+        .btn:hover { background: #ff6b81; }
+        .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+        .error { color: #e94560; font-size: 14px; margin-top: 12px; text-align: center; }
+        .hidden { display: none; }
+
+        .hint { font-size: 12px; color: #666; margin-top: 16px; text-align: center; }
+        .hint a { color: #e94560; text-decoration: none; }
+    </style>
+</head>
+<body>
+<div class="card">
+    <h1>🎬 Danmaku</h1>
+    <div class="sub">登录后即可发送弹幕</div>
+
+    <div class="tabs">
+        <button id="tabLogin" class="active" onclick="switchTab('login')">登录</button>
+        <button id="tabRegister" onclick="switchTab('register')">注册</button>
+    </div>
+
+    <!-- 登录表单 -->
+    <form id="loginForm" onsubmit="return doLogin(event)">
+        <div class="form-group">
+            <label>用户名</label>
+            <input id="loginUsername" type="text" placeholder="3-32 位字母数字" required minlength="3" maxlength="32" pattern="[a-zA-Z0-9]+">
+        </div>
+        <div class="form-group">
+            <label>密码</label>
+            <input id="loginPassword" type="password" placeholder="至少 6 位" required minlength="6">
+        </div>
+        <button class="btn" type="submit" id="loginBtn">登录</button>
+        <div id="loginError" class="error hidden"></div>
+    </form>
+
+    <!-- 注册表单 -->
+    <form id="registerForm" class="hidden" onsubmit="return doRegister(event)">
+        <div class="form-group">
+            <label>用户名</label>
+            <input id="regUsername" type="text" placeholder="3-32 位字母数字" required minlength="3" maxlength="32" pattern="[a-zA-Z0-9]+">
+        </div>
+        <div class="form-group">
+            <label>昵称（可选）</label>
+            <input id="regNickname" type="text" placeholder="留空则使用用户名">
+        </div>
+        <div class="form-group">
+            <label>密码</label>
+            <input id="regPassword" type="password" placeholder="至少 6 位" required minlength="6">
+        </div>
+        <button class="btn" type="submit" id="regBtn">注册</button>
+        <div id="regError" class="error hidden"></div>
+    </form>
+
+    <div class="hint">
+        已有账号？ <a href="#" onclick="switchTab('login');return false">登录</a>
+        &nbsp;|&nbsp; <a href="http://localhost:8080/?room=test">直接进入（匿名）</a>
+    </div>
+</div>
+
+<script>
+    function switchTab(tab) {
+        document.getElementById('tabLogin').className = tab === 'login' ? 'active' : '';
+        document.getElementById('tabRegister').className = tab === 'register' ? 'active' : '';
+        document.getElementById('loginForm').className = tab === 'login' ? '' : 'hidden';
+        document.getElementById('registerForm').className = tab === 'register' ? '' : 'hidden';
+        document.getElementById('loginError').classList.add('hidden');
+        document.getElementById('regError').classList.add('hidden');
+    }
+
+    function showError(id, msg) {
+        const el = document.getElementById(id);
+        el.textContent = msg;
+        el.classList.remove('hidden');
+    }
+
+    async function apiPost(path, body) {
+        const resp = await fetch(path, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'request failed');
+        return data;
+    }
+
+    async function doLogin(e) {
+        e.preventDefault();
+        const btn = document.getElementById('loginBtn');
+        btn.disabled = true;
+        btn.textContent = '登录中…';
+        try {
+            const data = await apiPost('/api/auth/login', {
+                username: document.getElementById('loginUsername').value,
+                password: document.getElementById('loginPassword').value,
+            });
+            localStorage.setItem('token', data.token);
+            localStorage.setItem('username', data.user.username);
+            localStorage.setItem('nickname', data.user.nickname);
+            window.location.href = '/?room=test';
+        } catch (err) {
+            showError('loginError', err.message);
+        } finally {
+            btn.disabled = false;
+            btn.textContent = '登录';
+        }
+        return false;
+    }
+
+    async function doRegister(e) {
+        e.preventDefault();
+        const btn = document.getElementById('regBtn');
+        btn.disabled = true;
+        btn.textContent = '注册中…';
+        try {
+            const data = await apiPost('/api/auth/register', {
+                username: document.getElementById('regUsername').value,
+                password: document.getElementById('regPassword').value,
+                nickname: document.getElementById('regNickname').value || undefined,
+            });
+            localStorage.setItem('token', data.token);
+            localStorage.setItem('username', data.user.username);
+            localStorage.setItem('nickname', data.user.nickname);
+            window.location.href = '/?room=test';
+        } catch (err) {
+            showError('regError', err.message);
+        } finally {
+            btn.disabled = false;
+            btn.textContent = '注册';
+        }
+        return false;
+    }
+
+    // 已登录则直接跳转
+    if (localStorage.getItem('token')) {
+        window.location.href = '/?room=test';
+    }
+</script>
+</body>
+</html>

@@ -27,6 +27,9 @@ type Client struct {
 	handler  MessageHandler
 	clientIP string
 
+	UserID   string // 认证用户的 ID，"" 表示匿名
+	Username string // 认证用户的用户名，"" 表示匿名
+
 	done     chan struct{}
 	stopOnce sync.Once
 	release  func()

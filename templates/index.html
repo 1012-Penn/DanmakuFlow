@@ -68,9 +68,25 @@
         .status.ok { color: #2ecc71; }
         .status.error { color: #e94560; }
         .error { color: #e94560; font-size: 18px; text-align: center; margin-top: 100px; }
+
+        /* ---- 用户栏 ---- */
+        #userbar {
+            font-size: 13px; color: #aaa; margin-bottom: 8px;
+            display: flex; justify-content: flex-end; gap: 12px; align-items: center;
+        }
+        #userbar .name { color: #e94560; }
+        #userbar .logout {
+            color: #888; cursor: pointer; text-decoration: underline;
+            font-size: 12px;
+        }
+        #userbar .logout:hover { color: #e94560; }
     </style>
 </head>
 <body>
+    <div id="userbar">
+        <span id="userDisplay"></span>
+        <span class="logout" id="logoutBtn" onclick="doLogout()" style="display:none">退出</span>
+    </div>
     <h1>Danmaku</h1>
     <div id="room-header">📺 房间: <span id="room-name">-</span></div>
     <div id="box"></div>
@@ -101,6 +117,25 @@
         const typeSelect = document.getElementById('typeSelect');
         const statusEl = document.getElementById('status');
         document.getElementById('room-name').textContent = roomID;
+
+        // ---- 用户显示 ----
+        const token = localStorage.getItem('token');
+        const username = localStorage.getItem('username');
+        const nickname = localStorage.getItem('nickname');
+        const userDisplay = document.getElementById('userDisplay');
+        const logoutBtn = document.getElementById('logoutBtn');
+        if (token && username) {
+            userDisplay.innerHTML = '👤 <span class="name">' + (nickname || username) + '</span>';
+            logoutBtn.style.display = 'inline';
+        } else {
+            userDisplay.innerHTML = '<a href="/login" style="color:#e94560;text-decoration:none">登录</a>';
+        }
+        function doLogout() {
+            localStorage.removeItem('token');
+            localStorage.removeItem('username');
+            localStorage.removeItem('nickname');
+            location.reload();
+        }
 
         // ---- 重连状态 ----
         let ws = null;
@@ -201,6 +236,12 @@
             // 构建 WS URL，使用 location.host 避免硬编码
             const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
             let url = protocol + '//' + location.host + '/ws?room_id=' + encodeURIComponent(roomID);
+
+            // 携带 JWT token（如果已登录）
+            const tok = localStorage.getItem('token');
+            if (tok) {
+                url += '&token=' + encodeURIComponent(tok);
+            }
 
             // 断线重连时携带历史补偿参数
             if (reconnectAttempts > 0 && lastTimestamp) {

@@ -244,12 +244,14 @@ func TestConnRelease(t *testing.T) {
 func TestBroadcastToRoomNoRedis(t *testing.T) {
 	hub := NewHubWithConfig(Config{BroadcastBufferSize: 64}, nil)
 
+	// 先创建房间
+	hub.GetOrCreateRoom("test_room")
 	// 没有 Redis 配置时，广播不应 panic，不应阻塞
 	hub.BroadcastToRoom("test_room", []byte(`{"msg":"hello"}`))
 
 	// 验证房间被创建且有消息
-	room := hub.GetRoom("test_room")
-	if room == nil {
+	room, ok := hub.GetRoom("test_room")
+	if !ok || room == nil {
 		t.Fatal("BroadcastToRoom 应创建房间")
 	}
 }

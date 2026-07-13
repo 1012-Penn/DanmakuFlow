@@ -240,7 +240,6 @@ func runBot(id int, isTalker bool, tracker *BenchmarkTracker) {
 
 			ticker := time.NewTicker(*rate)
 			defer ticker.Stop()
-			defer conn.Close()
 
 			for seq := 0; ; seq++ {
 				select {
