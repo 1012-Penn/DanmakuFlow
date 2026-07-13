@@ -40,6 +40,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/1012-Penn/DanmakuFlow/model"
 )
 
 // 命令行参数
@@ -167,7 +169,7 @@ func runWSBenchmark() {
 	close(monitorDone)
 
 	// 计算统计
-	stats := tracker.Compute(steadyStart, steadyEnd, connCount.Load(), *connections, 0, errorCount.Load(),
+	stats := tracker.Compute(steadyStart, steadyEnd, connsAtStart, *connections, 0, errorCount.Load(),
 		fmt.Sprintf("c=%d r=%s talker=%.0f%% room=%s", *connections, *rate, *talkerRatio*100, *roomID))
 
 	// 计算排空后仍未到达
@@ -197,33 +199,35 @@ func runBot(id int, isTalker bool, tracker *BenchmarkTracker) {
 
 	// 读 goroutine：持续接收服务端广播
 	go func(listenerID int) {
-		defer conn.Close()
+		defer func() {
+			connCount.Add(-1)
+			conn.Close()
+		}()
 		for {
 			_, data, err := conn.ReadMessage()
 			if err != nil {
 				return
 			}
-			now := time.Now()
+			var env model.MessageEnvelope
+			if json.Unmarshal(data, &env) != nil || env.Type != model.MsgTypeBroadcast {
+				continue
+			}
 			msgRecvCount.Add(1)
 
 			if *trackMsgs {
-				var msg map[string]any
-				if json.Unmarshal(data, &msg) != nil {
-					continue
-				}
-				content, ok := msg["content"].(string)
-				if !ok {
+				var dm model.Danmaku
+				if json.Unmarshal(env.Payload, &dm) != nil {
 					continue
 				}
 				// 解析 "bm{talkerID}_s{seq}_i{sendIdx}" 格式
 				var talkerID, seq int
 				var sendIdx int64
-				if n, _ := fmt.Sscanf(content, "bm%d_s%d_i%d", &talkerID, &seq, &sendIdx); n == 3 {
+				if n, _ := fmt.Sscanf(dm.Content, "bm%d_s%d_i%d", &talkerID, &seq, &sendIdx); n == 3 {
 					tracker.RecordDelivery(listenerID, MessageID{
 						TalkerID: talkerID,
 						Seq:      seq,
 						SendIdx:  sendIdx,
-					}, now)
+					}, time.Now())
 				}
 			}
 		}
@@ -243,16 +247,21 @@ func runBot(id int, isTalker bool, tracker *BenchmarkTracker) {
 				case <-ticker.C:
 					sendTime := time.Now()
 					expectedClients := int(connCount.Load())
-					// 先记录发送（获取 sendIdx），再发送包含 sendIdx 的消息
-					msgID := tracker.RecordSend(tID, seq, sendTime, expectedClients)
+					msgID := tracker.NextMessageID(tID, seq)
 					content := fmt.Sprintf("bm%d_s%d_i%d", tID, seq, msgID.SendIdx)
-					msg := map[string]any{
-						"content": content,
-						"user_id": fmt.Sprintf("bench_%d", tID),
-						"color":   "#ffffff",
-						"type":    "scroll",
+					req := map[string]any{
+						"content":    content,
+						"user_id":    fmt.Sprintf("bench_%d", tID),
+						"color":      "#ffffff",
+						"type":       "scroll",
+						"request_id": content,
 					}
-					data, err := json.Marshal(msg)
+					payload, err := json.Marshal(req)
+					if err != nil {
+						errorCount.Add(1)
+						continue
+					}
+					data, err := json.Marshal(model.MessageEnvelope{Type: model.MsgTypeDanmaku, Payload: payload})
 					if err != nil {
 						errorCount.Add(1)
 						continue
@@ -264,6 +273,7 @@ func runBot(id int, isTalker bool, tracker *BenchmarkTracker) {
 						}
 						return
 					}
+					tracker.RecordSend(msgID, sendTime, expectedClients)
 					msgSentCount.Add(1)
 
 				case <-stopBarrier:

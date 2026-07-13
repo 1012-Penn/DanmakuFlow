@@ -231,20 +231,12 @@ func TestTryAcquireConn_ConcurrentRoomLimit(t *testing.T) {
 
 func TestConnRelease(t *testing.T) {
 	hub := NewHubWithConfig(Config{MaxConnPerIP: 1}, nil)
-
-	// 手动递增
 	rel, _ := hub.TryAcquireConn("10.0.0.1", "r")
-
-	// 释放两种计数
-	hub.connReleaseAll("10.0.0.1", "r")
-
-	// 幂等释放——不应 panic 或负数
-	hub.connReleaseAll("10.0.0.1", "r")
-	hub.connReleaseAll("10.0.0.1", "r")
-
-	// 不应影响新获取
 	rel()
-	_ = rel
+	rel()
+	if _, ok := hub.TryAcquireConn("10.0.0.1", "r"); !ok {
+		t.Fatal("幂等释放后应能重新获取")
+	}
 }
 
 // ──────────── BroadcastToRoom + Redis publish queue ────────────
@@ -326,4 +318,14 @@ func TestServeWsNoGlobalUpgraderMutation(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+func TestClientEnqueueAfterStop(t *testing.T) {
+	c := &Client{send: make(chan []byte, 1), done: make(chan struct{})}
+	c.stop()
+	for i := 0; i < 100; i++ {
+		if c.enqueue([]byte("message")) {
+			t.Fatal("stopped client must reject enqueue")
+		}
+	}
 }

@@ -66,9 +66,9 @@ func TestMemoryStore_ListSince(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListSince 游标失败: %v", err)
 	}
-	// 应返回 (created_at > sinceTime) 的 "e"，以及 (created_at=sinceTime AND id>"y") 的 "z"
-	if len(cursorResult) != 2 || cursorResult[0].ID != "e" || cursorResult[1].ID != "z" {
-		t.Errorf("游标查询期望 ['e','z']，实际 %v", ids(cursorResult))
+	// ORDER BY created_at ASC, id ASC，因此同时间戳的 z 在后一秒的 e 之前。
+	if len(cursorResult) != 2 || cursorResult[0].ID != "z" || cursorResult[1].ID != "e" {
+		t.Errorf("游标查询期望 ['z','e']，实际 %v", ids(cursorResult))
 	}
 
 	// 测试房间隔离

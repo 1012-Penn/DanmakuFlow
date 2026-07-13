@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -27,6 +28,11 @@ type CreateDanmakuRequest struct {
 	FontSize  int    `json:"font_size"`
 	RequestID string `json:"request_id"`
 }
+
+var (
+	ErrPersistenceQueueFull = errors.New("persistence queue is full")
+	ErrPersistenceFailed    = errors.New("persistence failed")
+)
 
 // rateLimiter 基于内存的每用户频率限制。
 type rateLimiter struct {
@@ -154,24 +160,22 @@ func (s *DanmakuService) HandleMessage(roomID string, data []byte) model.HandleR
 	}
 	req.RoomID = roomID
 
-	dm, err := s.createAndBroadcast(req)
+	dm, persistence, err := s.createAndBroadcast(req)
 	if err != nil {
 		slog.Warn("WS 弹幕校验不通过",
 			"room_id", roomID,
 			"error", err,
 		)
+		code := "validation_error"
+		if errors.Is(err, ErrPersistenceQueueFull) || errors.Is(err, ErrPersistenceFailed) {
+			code = "persistence_unavailable"
+		}
 		return model.HandleResult{
 			RequestID: req.RequestID,
 			OK:        false,
-			ErrorCode: "validation_error",
+			ErrorCode: code,
 			Reason:    err.Error(),
 		}
-	}
-
-	// 确定持久化状态
-	persistence := "persisted"
-	if s.danmakuChan != nil {
-		persistence = "buffered"
 	}
 
 	dataBytes, _ := json.Marshal(dm)
@@ -185,7 +189,8 @@ func (s *DanmakuService) HandleMessage(roomID string, data []byte) model.HandleR
 }
 
 func (s *DanmakuService) CreateDanmaku(req CreateDanmakuRequest) (model.Danmaku, error) {
-	return s.createAndBroadcast(req)
+	dm, _, err := s.createAndBroadcast(req)
+	return dm, err
 }
 
 func (s *DanmakuService) ListByRoom(roomID string, limit int) []model.Danmaku {
@@ -264,13 +269,14 @@ func (s *DanmakuService) Shutdown(ctx context.Context) error {
 				"remaining", s.inflight.Load(),
 				"error", pollCtx.Err(),
 			)
-			goto afterWait
+			// Do not close danmakuChan while an accepted request may still send.
+			// The caller may retry Shutdown after the dependency recovers.
+			return pollCtx.Err()
 		default:
-			time.Sleep(time.Microsecond)
+			time.Sleep(time.Millisecond)
 		}
 	}
 	slog.Info("所有在途请求已完成")
-afterWait:
 
 	// 3. 关闭 danmakuChan（此时保证无新写入）
 	if !s.closed.CompareAndSwap(false, true) {
@@ -299,20 +305,20 @@ afterWait:
 
 // createAndBroadcast 是内部核心方法。
 // 先登记 inflight 再检查 accepting，确保 Shutdown 不会漏掉在途请求。
-func (s *DanmakuService) createAndBroadcast(req CreateDanmakuRequest) (model.Danmaku, error) {
+func (s *DanmakuService) createAndBroadcast(req CreateDanmakuRequest) (model.Danmaku, string, error) {
 	s.inflight.Add(1)
 	defer s.inflight.Add(-1)
 
 	if !s.accepting.Load() {
-		return model.Danmaku{}, errors.New("service is shutting down")
+		return model.Danmaku{}, "", errors.New("service is shutting down")
 	}
 
 	if err := req.validate(); err != nil {
-		return model.Danmaku{}, err
+		return model.Danmaku{}, "", err
 	}
 
 	if s.rateLimiter != nil && !s.rateLimiter.Allow(req.UserID) {
-		return model.Danmaku{}, errors.New("sending too fast, please wait")
+		return model.Danmaku{}, "", errors.New("sending too fast, please wait")
 	}
 
 	color := req.Color
@@ -334,15 +340,16 @@ func (s *DanmakuService) createAndBroadcast(req CreateDanmakuRequest) (model.Dan
 		Color:     color,
 		Type:      dmType,
 		FontSize:  fontSize,
-		Timestamp: time.Now(),
+		Timestamp: time.Now().UTC().Truncate(time.Millisecond),
 		RoomID:    req.RoomID,
 		UserID:    req.UserID,
 	}
 
+	persistence := "persisted"
 	if s.danmakuChan != nil {
 		select {
 		case s.danmakuChan <- dm:
-			// 成功入队，metrics 在 consumer 中处理
+			persistence = "buffered"
 		default:
 			slog.Warn("async write channel full, dropping danmaku",
 				"chan_cap", cap(s.danmakuChan),
@@ -350,6 +357,7 @@ func (s *DanmakuService) createAndBroadcast(req CreateDanmakuRequest) (model.Dan
 				"room_id", dm.RoomID,
 			)
 			metrics.StoreWriteTotal.WithLabelValues("drop").Inc()
+			return model.Danmaku{}, "", ErrPersistenceQueueFull
 		}
 	} else {
 		writeStart := time.Now()
@@ -360,6 +368,8 @@ func (s *DanmakuService) createAndBroadcast(req CreateDanmakuRequest) (model.Dan
 				"error", err,
 			)
 			metrics.StoreWriteTotal.WithLabelValues("error").Inc()
+			metrics.StoreWriteLatency.Observe(time.Since(writeStart).Seconds())
+			return model.Danmaku{}, "", fmt.Errorf("%w: %v", ErrPersistenceFailed, err)
 		} else {
 			metrics.StoreWriteTotal.WithLabelValues("success").Inc()
 		}
@@ -373,5 +383,5 @@ func (s *DanmakuService) createAndBroadcast(req CreateDanmakuRequest) (model.Dan
 	})
 	s.hub.BroadcastToRoom(req.RoomID, bcastPayload)
 
-	return dm, nil
+	return dm, persistence, nil
 }

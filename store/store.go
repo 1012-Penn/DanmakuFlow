@@ -1,6 +1,7 @@
 package store
 
 import (
+	"sort"
 	"sync"
 	"time"
 
@@ -67,12 +68,17 @@ func (s *MemoryStore) ListSince(roomID string, sinceTime time.Time, lastID strin
 		// 游标条件：(created_at > sinceTime) OR (created_at = sinceTime AND id > lastID)
 		if d.Timestamp.After(sinceTime) || (d.Timestamp.Equal(sinceTime) && d.ID > lastID) {
 			result = append(result, d)
-			if limit > 0 && len(result) >= limit {
-				break
-			}
 		}
 	}
-	// MemoryStore 的 danmakus 保持插入顺序，就是 created_at ASC
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Timestamp.Equal(result[j].Timestamp) {
+			return result[i].ID < result[j].ID
+		}
+		return result[i].Timestamp.Before(result[j].Timestamp)
+	})
+	if limit > 0 && len(result) > limit {
+		result = result[:limit]
+	}
 	return result, nil
 }
 

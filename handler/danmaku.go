@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -39,6 +40,10 @@ func (h *DanmakuHandler) Create(c *gin.Context) {
 	req.RoomID = roomID
 	dm, err := h.svc.CreateDanmaku(req)
 	if err != nil {
+		if errors.Is(err, service.ErrPersistenceQueueFull) || errors.Is(err, service.ErrPersistenceFailed) {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}

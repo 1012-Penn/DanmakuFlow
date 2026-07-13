@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -100,6 +101,12 @@ func main() {
 	// 7. 验证 Nginx WebSocket 代理
 	fmt.Println("\n7️⃣  验证 Nginx WebSocket 代理")
 	if !testNginxWebSocket() {
+		exitCode = 1
+	}
+
+	// 8. 验证断线重连历史补偿
+	fmt.Println("\n8️⃣  验证断线重连历史补偿")
+	if !testReconnectHistory() {
 		exitCode = 1
 	}
 
@@ -258,7 +265,95 @@ func testCrossInstanceDelivery() bool {
 	}
 	fmt.Printf("  ❌ B 未在 %v 内收到 A 的消息\n", timeout)
 	fmt.Printf("  ⚠️  如果 Redis 正在运行，预期 B 应收到跨实例广播\n")
-	fmt.Printf("  ⚠️  当前实现中 Redis 订阅断开不会自动重连\n")
+	return false
+}
+
+func testReconnectHistory() bool {
+	room := fmt.Sprintf("history_%d", time.Now().UnixNano())
+	ws, err := dialWS(instanceA, room)
+	if err != nil {
+		fmt.Printf("  ❌ 初次连接失败: %v\n", err)
+		return false
+	}
+	first := fmt.Sprintf("cursor_%d", time.Now().UnixNano())
+	if err := ws.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"content":%q,"user_id":"history_a"}`, first))); err != nil {
+		ws.Close()
+		return false
+	}
+
+	var lastID, lastTime string
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		ws.SetReadDeadline(deadline)
+		_, data, err := ws.ReadMessage()
+		if err != nil {
+			break
+		}
+		var env struct {
+			Type    string `json:"type"`
+			Payload struct {
+				ID        string `json:"id"`
+				Content   string `json:"content"`
+				Timestamp string `json:"timestamp"`
+			} `json:"payload"`
+		}
+		if json.Unmarshal(data, &env) == nil && env.Type == "broadcast" && env.Payload.Content == first {
+			lastID, lastTime = env.Payload.ID, env.Payload.Timestamp
+			break
+		}
+	}
+	ws.Close()
+	if lastID == "" || lastTime == "" {
+		fmt.Println("  ❌ 未获得重连游标")
+		return false
+	}
+
+	missing := fmt.Sprintf("missing_%d", time.Now().UnixNano())
+	body := strings.NewReader(fmt.Sprintf(`{"content":%q,"user_id":"history_b"}`, missing))
+	resp, err := http.Post(instanceB+"/api/room/"+room+"/danmaku", "application/json", body)
+	if err != nil || resp.StatusCode != http.StatusCreated {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		fmt.Printf("  ❌ 断线期间写入失败: %v\n", err)
+		return false
+	}
+	resp.Body.Close()
+	time.Sleep(300 * time.Millisecond)
+
+	wsURL := "ws" + strings.TrimPrefix(instanceA, "http") + "/ws?room_id=" + url.QueryEscape(room) +
+		"&since_time=" + url.QueryEscape(lastTime) + "&last_message_id=" + url.QueryEscape(lastID)
+	reconnected, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		fmt.Printf("  ❌ 重连失败: %v\n", err)
+		return false
+	}
+	defer reconnected.Close()
+	reconnected.SetReadDeadline(time.Now().Add(timeout))
+	for {
+		_, data, err := reconnected.ReadMessage()
+		if err != nil {
+			break
+		}
+		var env struct {
+			Type    string `json:"type"`
+			Payload struct {
+				Danmaku []struct {
+					Content string `json:"content"`
+				} `json:"danmaku"`
+			} `json:"payload"`
+		}
+		if json.Unmarshal(data, &env) != nil || env.Type != "history" {
+			continue
+		}
+		for _, dm := range env.Payload.Danmaku {
+			if dm.Content == missing {
+				fmt.Println("  ✅ 断线期间消息通过 history 信封补偿成功")
+				return true
+			}
+		}
+	}
+	fmt.Println("  ❌ 重连后未收到断线期间消息")
 	return false
 }
 

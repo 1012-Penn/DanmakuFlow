@@ -167,22 +167,19 @@ type BenchmarkTracker struct {
 	sendIdx    atomic.Int64 // 全局递增发送序号，用于生成唯一 message_id
 }
 
-// RecordSend 记录一条已发送消息，返回分配的 MessageID（内含 sendIdx）。
-func (bt *BenchmarkTracker) RecordSend(talkerID, seq int, sendTime time.Time, expectedClients int) MessageID {
+func (bt *BenchmarkTracker) NextMessageID(talkerID, seq int) MessageID {
+	return MessageID{TalkerID: talkerID, Seq: seq, SendIdx: bt.sendIdx.Add(1)}
+}
+
+// RecordSend only records a message after WriteMessage succeeds.
+func (bt *BenchmarkTracker) RecordSend(id MessageID, sendTime time.Time, expectedClients int) {
 	bt.mu.Lock()
 	defer bt.mu.Unlock()
-	sendIdx := bt.sendIdx.Add(1)
-	id := MessageID{
-		TalkerID: talkerID,
-		Seq:      seq,
-		SendIdx:  sendIdx,
-	}
 	bt.sends = append(bt.sends, SendRecord{
 		ID:              id,
 		SendTime:        sendTime,
 		ExpectedClients: expectedClients,
 	})
-	return id
 }
 
 // RecordDelivery 记录一次投递接收。
@@ -213,6 +210,24 @@ func (bt *BenchmarkTracker) Compute(steadyStart, steadyEnd time.Time, connSucces
 	lats := make([]LatencyRecord, len(bt.latencies))
 	copy(lats, bt.latencies)
 	bt.mu.Unlock()
+
+	// Derive latency from the authoritative send table. Delivery may be recorded
+	// before RecordSend because reader and writer goroutines run independently.
+	sendTimes := make(map[int64]time.Time, len(sends))
+	for _, send := range sends {
+		sendTimes[send.ID.SendIdx] = send.SendTime
+	}
+	seen := make(map[[2]int64]struct{}, len(dels))
+	for _, delivery := range dels {
+		key := [2]int64{int64(delivery.ListenerID), delivery.MessageID.SendIdx}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		if sentAt, ok := sendTimes[delivery.MessageID.SendIdx]; ok && !delivery.ReceiveTime.Before(sentAt) {
+			lats = append(lats, LatencyRecord{Latency: delivery.ReceiveTime.Sub(sentAt)})
+		}
+	}
 
 	return ComputeStats(sends, dels, lats, steadyStart, steadyEnd, connSuccess, connTotal, drainRemaining, errors, config)
 }

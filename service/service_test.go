@@ -1,10 +1,80 @@
 package service
 
 import (
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/1012-Penn/DanmakuFlow/model"
+	"github.com/1012-Penn/DanmakuFlow/store"
+	"github.com/1012-Penn/DanmakuFlow/websocket"
 )
+
+type testStore struct {
+	*store.MemoryStore
+	addErr  error
+	started chan struct{}
+	unblock chan struct{}
+}
+
+func (s *testStore) Add(dm model.Danmaku) error {
+	if s.started != nil {
+		select {
+		case s.started <- struct{}{}:
+		default:
+		}
+	}
+	if s.unblock != nil {
+		<-s.unblock
+	}
+	if s.addErr != nil {
+		return s.addErr
+	}
+	return s.MemoryStore.Add(dm)
+}
+
+func validRequest() CreateDanmakuRequest {
+	return CreateDanmakuRequest{Content: "hello", UserID: "u1", RoomID: "r1"}
+}
+
+func TestPersistenceFailureIsReturned(t *testing.T) {
+	s := &testStore{MemoryStore: store.New(), addErr: errors.New("db down")}
+	svc := NewDanmakuService(s, websocket.NewHub(), 0, 0, true)
+	if _, err := svc.CreateDanmaku(validRequest()); !errors.Is(err, ErrPersistenceFailed) {
+		t.Fatalf("expected persistence failure, got %v", err)
+	}
+}
+
+func TestAsyncQueueFullIsReturned(t *testing.T) {
+	s := &testStore{MemoryStore: store.New(), started: make(chan struct{}, 1), unblock: make(chan struct{})}
+	svc := NewDanmakuService(s, websocket.NewHub(), 1, 0, true)
+
+	if _, err := svc.CreateDanmaku(validRequest()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-s.started:
+	case <-time.After(time.Second):
+		t.Fatal("consumer did not start")
+	}
+	second := validRequest()
+	second.UserID = "u2"
+	if _, err := svc.CreateDanmaku(second); err != nil {
+		t.Fatal(err)
+	}
+	third := validRequest()
+	third.UserID = "u3"
+	if _, err := svc.CreateDanmaku(third); !errors.Is(err, ErrPersistenceQueueFull) {
+		t.Fatalf("expected queue full, got %v", err)
+	}
+
+	close(s.unblock)
+	if err := svc.Shutdown(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestRateLimiterNoLimit(t *testing.T) {
 	rl := newRateLimiter(0) // 0 = 不限制

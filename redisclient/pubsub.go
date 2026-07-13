@@ -126,81 +126,76 @@ func (c *Client) subscriptionLoop(ctx context.Context, ch chan<- Message) {
 	defer close(ch)
 
 	backoff := subBackoffMin
-
 	for {
-		// 检查 ctx 是否已取消
-		select {
-		case <-ctx.Done():
-			metrics.RedisSubStatus.Set(0)
-			return
-		default:
-		}
-
 		pubsub := c.rdb.PSubscribe(ctx, "room:*")
-		metrics.RedisSubStatus.Set(1)
-		backoff = subBackoffMin // 连接成功，重置退避
-
-		innerLoop := func() bool {
-			defer pubsub.Close()
-			for {
-				redisMsg, err := pubsub.ReceiveMessage(ctx)
-				if err != nil {
-					metrics.RedisSubStatus.Set(0)
-
-					if ctx.Err() != nil {
-						// context 取消，不重连
-						slog.Info("Redis 订阅已退出（shutdown）")
-						return false
-					}
-
-					// 连接错误，需要重连
-					metrics.RedisSubEvents.Inc()
-					slog.Warn("Redis 订阅断开，准备重连",
-						"error", err,
-						"backoff", backoff,
-					)
-
-					// 退避等待
-					jittered := time.Duration(float64(backoff) * (0.8 + rand.Float64()*0.4))
-					select {
-					case <-time.After(jittered):
-					case <-ctx.Done():
-						return false
-					}
-
-					// 指数退避
-					backoff = time.Duration(float64(backoff) * 2)
-					if backoff > subBackoffMax {
-						backoff = subBackoffMax
-					}
-					return true // 重连
-				}
-
-				var msg Message
-				if err := json.Unmarshal([]byte(redisMsg.Payload), &msg); err != nil {
-					slog.Warn("Redis 消息解析失败", "error", err)
-					continue
-				}
-
-				// 跳过自己发布的消息
-				if msg.SourceID == c.instance {
-					continue
-				}
-
-				select {
-				case ch <- msg:
-				case <-ctx.Done():
-					metrics.RedisSubStatus.Set(0)
-					return false
-				}
+		if _, err := pubsub.Receive(ctx); err != nil {
+			_ = pubsub.Close()
+			if !c.waitForReconnect(ctx, err, backoff) {
+				return
 			}
-		}()
-
-		if !innerLoop {
-			return // shutdown，不再重连
+			backoff = growBackoff(backoff)
+			continue
 		}
-		// innerLoop 返回 true → 继续外循环（重连）
+
+		metrics.RedisSubStatus.Set(1)
+		connectedAt := time.Now()
+		for {
+			redisMsg, err := pubsub.ReceiveMessage(ctx)
+			if err != nil {
+				_ = pubsub.Close()
+				if time.Since(connectedAt) >= 30*time.Second {
+					backoff = subBackoffMin
+				}
+				if !c.waitForReconnect(ctx, err, backoff) {
+					return
+				}
+				backoff = growBackoff(backoff)
+				break
+			}
+
+			var msg Message
+			if err := json.Unmarshal([]byte(redisMsg.Payload), &msg); err != nil {
+				slog.Warn("Redis 消息解析失败", "error", err)
+				continue
+			}
+			if msg.SourceID == c.instance {
+				continue
+			}
+			select {
+			case ch <- msg:
+			case <-ctx.Done():
+				metrics.RedisSubStatus.Set(0)
+				_ = pubsub.Close()
+				return
+			}
+		}
 	}
+}
+
+func (c *Client) waitForReconnect(ctx context.Context, err error, backoff time.Duration) bool {
+	metrics.RedisSubStatus.Set(0)
+	if ctx.Err() != nil {
+		return false
+	}
+	metrics.RedisSubEvents.Inc()
+	slog.Warn("Redis 订阅断开，准备重连", "error", err, "backoff", backoff)
+	jittered := time.Duration(float64(backoff) * (0.8 + rand.Float64()*0.4))
+	timer := time.NewTimer(jittered)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func growBackoff(current time.Duration) time.Duration {
+	next := current * 2
+	if next > subBackoffMax {
+		return subBackoffMax
+	}
+	return next
 }
 
 // Close 关闭 Redis 连接。

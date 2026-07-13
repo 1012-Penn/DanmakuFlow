@@ -3,7 +3,7 @@ package websocket
 import (
 	"encoding/json"
 	"log/slog"
-	"sync/atomic"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -27,10 +27,12 @@ type Client struct {
 	handler  MessageHandler
 	clientIP string
 
-	connReleased atomic.Bool
+	done     chan struct{}
+	stopOnce sync.Once
+	release  func()
 }
 
-func NewClient(hub *Hub, room *Room, conn *websocket.Conn, handler MessageHandler, clientIP string) *Client {
+func NewClient(hub *Hub, room *Room, conn *websocket.Conn, handler MessageHandler, clientIP string, release func()) *Client {
 	return &Client{
 		hub:      hub,
 		room:     room,
@@ -38,6 +40,8 @@ func NewClient(hub *Hub, room *Room, conn *websocket.Conn, handler MessageHandle
 		send:     make(chan []byte, hub.sendBufferSize()),
 		handler:  handler,
 		clientIP: clientIP,
+		done:     make(chan struct{}),
+		release:  release,
 	}
 }
 
@@ -46,16 +50,11 @@ func NewClient(hub *Hub, room *Room, conn *websocket.Conn, handler MessageHandle
 // 使用 select 风格的 unregister：当 Room 已停止时跳过 unregister 避免阻塞。
 func (c *Client) readPump() {
 	defer func() {
-		// 尝试向 room 发送注销信号，不阻塞
 		select {
 		case c.room.unregister <- c:
 		case <-c.room.done:
-			// Room 已停止，跳过 unregister
-		default:
-			// unregister channel 也可能已满，但 Room.Run 不会让它满
 		}
-		c.releaseConn()
-		c.conn.Close()
+		c.stop()
 	}()
 
 	pongWait := c.hub.pongWait()
@@ -83,8 +82,9 @@ func (c *Client) sendResult(result model.HandleResult) {
 
 	if !result.OK {
 		errPayload, _ := json.Marshal(model.ErrorPayload{
-			Code:    result.ErrorCode,
-			Message: result.Reason,
+			RequestID: result.RequestID,
+			Code:      result.ErrorCode,
+			Message:   result.Reason,
 		})
 		env = model.MessageEnvelope{
 			Type:    model.MsgTypeError,
@@ -104,21 +104,40 @@ func (c *Client) sendResult(result model.HandleResult) {
 	}
 
 	data, _ := json.Marshal(env)
-	select {
-	case c.send <- data:
-	default:
+	if !c.enqueue(data) {
 		slog.Warn("ACK 发送队列满，丢弃 ACK",
 			"message_id", result.MessageID,
 		)
 	}
 }
 
-// releaseConn 幂等地释放 IP 和房间连接计数。
-func (c *Client) releaseConn() {
-	if !c.connReleased.CompareAndSwap(false, true) {
-		return
+func (c *Client) enqueue(data []byte) bool {
+	select {
+	case <-c.done:
+		return false
+	default:
 	}
-	c.hub.connReleaseAll(c.clientIP, c.room.ID)
+	select {
+	case c.send <- data:
+		return true
+	case <-c.done:
+		return false
+	default:
+		return false
+	}
+}
+
+// stop is the single owner of connection shutdown and quota release.
+func (c *Client) stop() {
+	c.stopOnce.Do(func() {
+		close(c.done)
+		if c.release != nil {
+			c.release()
+		}
+		if c.conn != nil {
+			_ = c.conn.Close()
+		}
+	})
 }
 
 // writePump 从 send channel 取消息 → 写到 WebSocket 连接。
@@ -129,20 +148,20 @@ func (c *Client) writePump() {
 	ticker := time.NewTicker(c.hub.pingPeriod())
 	defer func() {
 		ticker.Stop()
-		c.conn.Close()
+		c.stop()
 	}()
 
 	for {
 		select {
-		case msg, ok := <-c.send:
-			if !ok {
-				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
-				return
-			}
+		case msg := <-c.send:
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := c.conn.WriteMessage(websocket.TextMessage, msg); err != nil {
 				return
 			}
+
+		case <-c.done:
+			_ = c.conn.WriteControl(websocket.CloseMessage, nil, time.Now().Add(writeWait))
+			return
 
 		case <-ticker.C:
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))

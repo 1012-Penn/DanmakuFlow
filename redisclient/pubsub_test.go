@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestGenerateInstanceID 验证实例 ID 生成策略：
@@ -48,6 +49,18 @@ func TestGenerateInstanceID(t *testing.T) {
 			t.Errorf("特殊字符应被替换, 得到 %q", id)
 		}
 	})
+}
+
+func TestGrowBackoff(t *testing.T) {
+	if got := growBackoff(subBackoffMin); got != 2*subBackoffMin {
+		t.Fatalf("first backoff = %v", got)
+	}
+	if got := growBackoff(20 * time.Second); got != subBackoffMax {
+		t.Fatalf("capped backoff = %v", got)
+	}
+	if got := growBackoff(subBackoffMax); got != subBackoffMax {
+		t.Fatalf("max backoff must remain capped, got %v", got)
+	}
 }
 
 // TestMessageMarshalUnmarshal 验证 Message 的 JSON 编解码正确。

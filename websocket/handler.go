@@ -41,6 +41,12 @@ func ServeWs(hub *Hub, handler MessageHandler, c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "room parameter is required"})
 		return
 	}
+	if value := c.Query("since_time"); value != "" {
+		if _, err := time.Parse(time.RFC3339Nano, value); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid since_time"})
+			return
+		}
+	}
 
 	clientIP := c.ClientIP()
 	releaser, ok := hub.TryAcquireConn(clientIP, roomID)
@@ -66,7 +72,7 @@ func ServeWs(hub *Hub, handler MessageHandler, c *gin.Context) {
 		return
 	}
 
-	client := NewClient(hub, room, conn, handler, clientIP)
+	client := NewClient(hub, room, conn, handler, clientIP, releaser)
 
 	// 使用 select 向 room 注册，避免 Room 已停止时永久阻塞
 	select {
@@ -93,32 +99,45 @@ func sendHistoryOnReconnect(client *Client, handler MessageHandler, c *gin.Conte
 		return
 	}
 
-	sinceTime, err := time.Parse(time.RFC3339, sinceTimeStr)
+	sinceTime, err := time.Parse(time.RFC3339Nano, sinceTimeStr)
 	if err != nil {
 		slog.Warn("解析 since_time 失败", "value", sinceTimeStr, "error", err)
 		return
 	}
 
-	dms, err := handler.QueryHistory(roomID, sinceTime, lastMessageID, 100)
-	if err != nil {
-		slog.Warn("查询历史弹幕失败", "room_id", roomID, "error", err)
-		return
-	}
-	if len(dms) == 0 {
-		return
-	}
+	const pageSize = 100
+	const maxReplay = 1000
+	for replayed := 0; replayed < maxReplay; {
+		dms, err := handler.QueryHistory(roomID, sinceTime, lastMessageID, pageSize+1)
+		if err != nil {
+			slog.Warn("查询历史弹幕失败", "room_id", roomID, "error", err)
+			return
+		}
+		if len(dms) == 0 {
+			return
+		}
 
-	payload, _ := json.Marshal(model.HistoryPayload{
-		Danmaku: dms,
-		RoomID:  roomID,
-	})
-	env, _ := json.Marshal(model.MessageEnvelope{
-		Type:    model.MsgTypeHistory,
-		Payload: payload,
-	})
-	select {
-	case client.send <- env:
-	default:
-		slog.Warn("历史消息发送队列满", "room_id", roomID, "count", len(dms))
+		hasMore := len(dms) > pageSize
+		if hasMore {
+			dms = dms[:pageSize]
+		}
+		last := dms[len(dms)-1]
+		payload, _ := json.Marshal(model.HistoryPayload{
+			Danmaku:       dms,
+			RoomID:        roomID,
+			HasMore:       hasMore,
+			NextTime:      last.Timestamp.Format(time.RFC3339Nano),
+			NextMessageID: last.ID,
+		})
+		env, _ := json.Marshal(model.MessageEnvelope{Type: model.MsgTypeHistory, Payload: payload})
+		if !client.enqueue(env) {
+			slog.Warn("历史消息发送队列满", "room_id", roomID, "count", len(dms))
+			return
+		}
+		replayed += len(dms)
+		if !hasMore {
+			return
+		}
+		sinceTime, lastMessageID = last.Timestamp, last.ID
 	}
 }

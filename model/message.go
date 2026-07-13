@@ -37,14 +37,18 @@ type AckPayload struct {
 
 // ErrorPayload 是错误消息的负载。
 type ErrorPayload struct {
-	Code    string `json:"code"`    // 错误码
-	Message string `json:"message"` // 人类可读的错误描述
+	RequestID string `json:"request_id,omitempty"`
+	Code      string `json:"code"`    // 错误码
+	Message   string `json:"message"` // 人类可读的错误描述
 }
 
 // HistoryPayload 是历史弹幕补偿的负载。
 type HistoryPayload struct {
-	Danmaku []Danmaku `json:"danmaku"` // 历史弹幕列表
-	RoomID  string    `json:"room_id"` // 房间 ID
+	Danmaku       []Danmaku `json:"danmaku"`
+	RoomID        string    `json:"room_id"`
+	HasMore       bool      `json:"has_more"`
+	NextTime      string    `json:"next_time,omitempty"`
+	NextMessageID string    `json:"next_message_id,omitempty"`
 }
 
 // HandleResult 是 HandleMessage 的返回类型。

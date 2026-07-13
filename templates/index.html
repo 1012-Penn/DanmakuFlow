@@ -111,8 +111,41 @@
         let lastMessageId = '';
         let lastTimestamp = '';
 
-        // 弹幕去重 set（重连时用）
+        // 实时广播与历史补偿共用同一套有界去重状态。
         const renderedIds = new Set();
+        const renderedOrder = [];
+        const MAX_RENDERED_IDS = 10000;
+        const pendingRequests = new Map();
+        const clientUserId = 'web_' + Math.random().toString(36).slice(2, 10);
+
+        function newRequestId() {
+            if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+            return Date.now().toString(36) + '_' + Math.random().toString(36).slice(2);
+        }
+
+        function advanceCursor(d) {
+            if (!d || !d.timestamp) return;
+            const nextMs = Date.parse(d.timestamp);
+            const currentMs = lastTimestamp ? Date.parse(lastTimestamp) : -1;
+            if (nextMs > currentMs || (nextMs === currentMs && (d.id || '') > lastMessageId)) {
+                lastTimestamp = d.timestamp;
+                lastMessageId = d.id || '';
+            }
+        }
+
+        function acceptDanmaku(d) {
+            if (!d) return false;
+            if (d.id && renderedIds.has(d.id)) return false;
+            if (d.id) {
+                renderedIds.add(d.id);
+                renderedOrder.push(d.id);
+                if (renderedOrder.length > MAX_RENDERED_IDS) {
+                    renderedIds.delete(renderedOrder.shift());
+                }
+            }
+            advanceCursor(d);
+            return true;
+        }
 
         // ---- 弹幕海：密集行 + 多样变化 ----
         const ROW_HEIGHT = 22;
@@ -198,11 +231,7 @@
 
                 switch (env.type) {
                     case 'broadcast':
-                        if (env.payload) {
-                            // 追踪最后一条消息的 ID 和时间戳
-                            if (env.payload.id) lastMessageId = env.payload.id;
-                            if (env.payload.timestamp) lastTimestamp = env.payload.timestamp;
-                            // 广播渲染（无需去重）
+                        if (acceptDanmaku(env.payload)) {
                             renderDanmaku(env.payload);
                         }
                         break;
@@ -211,11 +240,7 @@
                         if (env.payload && env.payload.danmaku) {
                             // 历史补偿：按 message_id 去重
                             env.payload.danmaku.forEach(function(d) {
-                                if (d.id && renderedIds.has(d.id)) return;
-                                if (d.id) renderedIds.add(d.id);
-                                if (d.id) lastMessageId = d.id;
-                                if (d.timestamp) lastTimestamp = d.timestamp;
-                                renderDanmaku(d);
+                                if (acceptDanmaku(d)) renderDanmaku(d);
                             });
                         }
                         break;
@@ -223,6 +248,7 @@
                     case 'ack':
                         // 确认消息：可选在 status 显示
                         if (env.payload && env.payload.ok) {
+                            if (env.payload.request_id) pendingRequests.delete(env.payload.request_id);
                             statusEl.textContent = '✓ sent (' + (env.payload.message_id || '').slice(0, 8) + ')';
                             statusEl.className = 'status ok';
                         }
@@ -231,6 +257,7 @@
                     case 'error':
                         // 错误消息：在 status 显示原因
                         if (env.payload) {
+                            if (env.payload.request_id) pendingRequests.delete(env.payload.request_id);
                             statusEl.textContent = '✗ ' + (env.payload.message || env.payload.code || 'error');
                             statusEl.className = 'status error';
                         }
@@ -260,11 +287,14 @@
             if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
 
             // 使用新信封格式（旧裸格式仍被服务端兼容）
+            const requestId = newRequestId();
+            pendingRequests.set(requestId, Date.now());
             ws.send(JSON.stringify({
                 type: 'danmaku',
                 payload: {
                     content: text,
-                    user_id: 'user_' + Date.now(),
+                    user_id: clientUserId,
+                    request_id: requestId,
                     color: '#ffffff',
                     type: typeSelect.value
                 }

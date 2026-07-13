@@ -88,7 +88,7 @@ func (r *Room) Run() {
 		// 关闭所有客户端的 send channel，让 writePump 自然发送关闭帧后退出
 		for client := range r.clients {
 			delete(r.clients, client)
-			close(client.send)
+			client.stop()
 		}
 		r.count.Store(0)
 	}()
@@ -103,7 +103,7 @@ func (r *Room) Run() {
 			if _, ok := r.clients[client]; ok {
 				delete(r.clients, client)
 				r.count.Add(-1)
-				close(client.send)
+				client.stop()
 				if r.count.Load() == 0 {
 					r.hub.RemoveRoomIfSame(r.ID, r)
 				}
@@ -134,10 +134,9 @@ func (r *Room) broadcastToClients(msg []byte) {
 				"room_id", r.ID,
 				"client_ip", client.clientIP,
 			)
-			close(client.send)
+			client.stop()
 			delete(r.clients, client)
 			r.count.Add(-1)
-			client.releaseConn()
 		}
 	}
 }
@@ -378,21 +377,6 @@ func (h *Hub) TryAcquireConn(ip string, roomID string) (release func(), ok bool)
 		}
 		metrics.WSConnections.Dec()
 	}, true
-}
-
-// connReleaseAll 供 Client 在断开连接时释放 IP 和房间两类计数。
-func (h *Hub) connReleaseAll(clientIP string, roomID string) {
-	h.counterMu.Lock()
-	defer h.counterMu.Unlock()
-	h.connCounter[clientIP]--
-	if h.connCounter[clientIP] <= 0 {
-		delete(h.connCounter, clientIP)
-	}
-	h.roomConnCount[roomID]--
-	if h.roomConnCount[roomID] <= 0 {
-		delete(h.roomConnCount, roomID)
-	}
-	metrics.WSConnections.Dec()
 }
 
 func (h *Hub) GetRoom(roomID string) *Room {
