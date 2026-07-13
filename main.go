@@ -117,9 +117,24 @@ func main() {
 		slog.Info("用户存储（Memory）已就绪")
 	}
 
-	// 组装依赖链
-	svc := service.NewDanmakuService(s, hub, cfg.Store.AsyncBufferSize, cfg.RateLimit.MessagesPerSec, hasDSN)
-	h := handler.New(svc, hub, cfg.Store.DefaultListLimit, instanceID)
+	// 创建 RoomStore 和 RoomService
+	var roomStore store.RoomStore
+	if hasDSN {
+		mysqlStore2, ok := s.(*store.MySQLStore)
+		if ok {
+			roomStore, err = store.NewMySQLRoomStore(mysqlStore2.DB())
+			if err != nil {
+				slog.Error("房间表初始化失败", "error", err)
+				os.Exit(1)
+			}
+			slog.Info("房间存储（MySQL）已就绪")
+		}
+	}
+	if roomStore == nil {
+		roomStore = store.NewMemoryRoomStore()
+		slog.Info("房间存储（Memory）已就绪")
+	}
+	roomSvc := service.NewRoomService(roomStore)
 
 	// 创建认证服务
 	authSvc := service.NewAuthService(
@@ -129,8 +144,13 @@ func main() {
 	)
 	authHandler := handler.NewAuthHandler(authSvc)
 
-	// 将认证服务注入 Hub（供 WebSocket 握手时认证）
+	// 组装弹幕服务（注入 RoomStatusGetter 用于房间状态检查）
+	svc := service.NewDanmakuService(s, hub, cfg.Store.AsyncBufferSize, cfg.RateLimit.MessagesPerSec, hasDSN, roomSvc)
+	h := handler.New(svc, hub, cfg.Store.DefaultListLimit, instanceID)
+
+	// 将认证服务和房间状态查询器注入 Hub
 	hub.SetAuthValidator(authSvc)
+	hub.SetRoomStatusGetter(roomSvc)
 
 	// 注册所有路由
 	h.RegisterRoutes(r)
@@ -138,13 +158,16 @@ func main() {
 	// 注册认证路由（公开：register/login，受 auth 中间件保护：me）
 	authHandler.RegisterAuthRoutes(r, authSvc)
 
-	// 为弹幕创建接口添加可选认证（有 token 用 token 中的 user_id，无 token 接受客户端传入）
-	room := r.Group("/api/room/:room_id")
-	room.Use(handler.OptionalAuthMiddleware(authSvc))
-	{
-		room.POST("/danmaku", h.Create)
-	}
+	// 注册房间路由（公开查询，认证写操作）
+	roomHandler := handler.NewRoomHandler(roomSvc)
+	roomHandler.RegisterRoomRoutes(r, handler.AuthMiddleware(authSvc))
 
+	// 弹幕创建接口使用强认证（需要 JWT，不再可选）
+	dmGroup := r.Group("/api/room/:room_id")
+	dmGroup.Use(handler.AuthMiddleware(authSvc))
+	{
+		dmGroup.POST("/danmaku", h.Create)
+	}
 	// 条件注册 pprof 路由（默认关闭）
 	if cfg.Pprof.Enabled {
 		pprofGroup := r.Group("/debug/pprof")

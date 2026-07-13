@@ -3,12 +3,16 @@ package model
 
 import "time"
 
-// UserClaims 是 JWT token 中携带的用户声明。
-// 定义在 model 包中，供 service/websocket 双方引用，避免循环依赖。
-type UserClaims struct {
-	UserID   string
-	Username string
-	Nickname string
+// 本文件中原本的 UserClaims 已被 Actor 替代，定义见 actor.go。
+//
+// ToActor 将 User 转换为 Actor（Authenticated=true）。
+func (u *User) ToActor() Actor {
+	return Actor{
+		UserID:        u.ID,
+		Username:      u.Username,
+		Nickname:      u.Nickname,
+		Authenticated: true,
+	}
 }
 
 // User 表示系统用户。

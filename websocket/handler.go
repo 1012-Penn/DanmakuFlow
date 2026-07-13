@@ -35,6 +35,14 @@ func buildCheckOrigin(allowedOrigins []string) func(r *http.Request) bool {
 
 // ServeWs 处理 WebSocket 握手请求。
 // 支持断线重连参数：since_time 和 last_message_id。
+//
+// 建连时执行以下检查：
+//  1. room_id 参数校验
+//  2. JWT 认证：无效 token → 401（不降级为匿名）；无 token → 匿名
+//  3. 房间存在性检查：不存在 → 404
+//  4. 房间状态检查：banned → 403；pending/ended → 409；live → 通过
+//  5. 连接配额检查
+//  6. Upgrade
 func ServeWs(hub *Hub, handler MessageHandler, c *gin.Context) {
 	roomID := c.DefaultQuery("room_id", "")
 	if roomID == "" {
@@ -48,8 +56,9 @@ func ServeWs(hub *Hub, handler MessageHandler, c *gin.Context) {
 		}
 	}
 
-	// 可选 JWT 认证：如果提供了 token 且在 Hub 上配置了验证器，则验证用户身份
-	var userID, username string
+	// 1. JWT 认证：无效 token → 401；提供 token → 验证通过后返回 Actor
+	//    无 token 或 token 为空 → 匿名 Actor
+	var actor model.Actor
 	if token := c.Query("token"); token != "" && hub.authValidator != nil {
 		claims, err := hub.authValidator.ValidateToken(token)
 		if err != nil {
@@ -57,8 +66,40 @@ func ServeWs(hub *Hub, handler MessageHandler, c *gin.Context) {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
 			return
 		}
-		userID = claims.UserID
-		username = claims.Username
+		actor = *claims
+	}
+
+	// 2. 房间存在性检查
+	if hub.roomStatusGetter != nil {
+		exists, err := hub.roomStatusGetter.Exists(roomID)
+		if err != nil {
+			slog.Error("检查房间存在性失败", "room_id", roomID, "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+			return
+		}
+		if !exists {
+			c.JSON(http.StatusNotFound, gin.H{"error": "room not found"})
+			return
+		}
+
+		// 3. 房间状态检查
+		status, err := hub.roomStatusGetter.GetStatus(roomID)
+		if err != nil {
+			slog.Error("查询房间状态失败", "room_id", roomID, "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+			return
+		}
+		switch status {
+		case model.RoomStatusBanned:
+			c.JSON(http.StatusForbidden, gin.H{"error": "room is banned"})
+			return
+		case model.RoomStatusPending, model.RoomStatusEnded:
+			c.JSON(http.StatusConflict, gin.H{
+				"error":  "room is not live",
+				"status": string(status),
+			})
+			return
+		}
 	}
 
 	clientIP := c.ClientIP()
@@ -86,8 +127,7 @@ func ServeWs(hub *Hub, handler MessageHandler, c *gin.Context) {
 	}
 
 	client := NewClient(hub, room, conn, handler, clientIP, releaser)
-	client.UserID = userID
-	client.Username = username
+	client.Actor = actor
 
 	// 使用 select 向 room 注册，避免 Room 已停止时永久阻塞
 	select {

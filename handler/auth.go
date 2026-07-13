@@ -113,41 +113,40 @@ func AuthMiddleware(authService *service.AuthService) gin.HandlerFunc {
 			return
 		}
 
-		claims, err := authService.ValidateToken(token)
+		actor, err := authService.ValidateToken(token)
 		if err != nil {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 			return
 		}
 
-		c.Set("user_id", claims.UserID)
-		c.Set("username", claims.Username)
-		c.Set("nickname", claims.Nickname)
+		c.Set("user_id", actor.UserID)
+		c.Set("username", actor.Username)
+		c.Set("nickname", actor.Nickname)
 		c.Next()
 	}
 }
 
 // OptionalAuthMiddleware 尝试解析 JWT，但不强制要求。
-// 解析成功则将用户信息注入 gin.Context；解析失败或没有 token 则静默通过。
-// 用于业务接口：如果有有效 JWT，用 token 中的 user_id；否则接受客户端传入的 user_id。
+// 已废弃：认证后的弹幕接口不再需要此中间件，POST /danmaku 已改为强制 AuthMiddleware。
+// 保留此函数供未来可能的不需要严格鉴权的查询类接口使用。
 func OptionalAuthMiddleware(authService *service.AuthService) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		token := extractBearerToken(c)
 		if token == "" {
-			// WebSocket 也可以从 query param 带 token
 			token = c.Query("token")
 		}
 		if token == "" {
 			c.Next()
 			return
 		}
-		claims, err := authService.ValidateToken(token)
+		actor, err := authService.ValidateToken(token)
 		if err != nil {
 			c.Next()
 			return
 		}
-		c.Set("user_id", claims.UserID)
-		c.Set("username", claims.Username)
-		c.Set("nickname", claims.Nickname)
+		c.Set("user_id", actor.UserID)
+		c.Set("username", actor.Username)
+		c.Set("nickname", actor.Nickname)
 		c.Next()
 	}
 }

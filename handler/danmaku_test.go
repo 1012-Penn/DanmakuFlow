@@ -69,7 +69,7 @@ func TestReadyzCombinations(t *testing.T) {
 
 			hub := tc.setupHub()
 			s := store.New()
-			svc := service.NewDanmakuService(s, hub, 0, 0, false)
+			svc := service.NewDanmakuService(s, hub, 0, 0, false, nil)
 			h := New(svc, hub, 20, "test-instance")
 
 			r := gin.New()

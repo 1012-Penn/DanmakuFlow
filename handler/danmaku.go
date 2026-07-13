@@ -38,12 +38,15 @@ func (h *DanmakuHandler) Create(c *gin.Context) {
 		return
 	}
 	req.RoomID = roomID
-	// 如果请求携带有效 JWT，用 token 中的 user_id 覆盖客户端传入的
+
+	// user_id 只能来自 AuthMiddleware 注入的 JWT 身份（路由已由 AuthMiddleware 保护）
+	// 忽略客户端 JSON 中传入的 user_id
 	if uid, ok := c.Get("user_id"); ok {
 		if uidStr, ok := uid.(string); ok && uidStr != "" {
 			req.UserID = uidStr
 		}
 	}
+
 	dm, err := h.svc.CreateDanmaku(req)
 	if err != nil {
 		if errors.Is(err, service.ErrPersistenceQueueFull) || errors.Is(err, service.ErrPersistenceFailed) {
@@ -183,8 +186,8 @@ func (h *DanmakuHandler) RegisterRoutes(r *gin.Engine) {
 	room := r.Group("/api/room/:room_id")
 	room.GET("/danmaku", h.List)
 
-	// Create 路由在 main.go 中由 OptionalAuthMiddleware 包裹后注册
-
+	// Create 路由在 main.go 中由 AuthMiddleware 包裹后注册（需要 JWT）
+	// WebSocket 路由
 	r.GET("/ws", func(c *gin.Context) {
 		websocket.ServeWs(h.hub, h.svc, c)
 	})

@@ -34,6 +34,11 @@ var (
 	ErrPersistenceFailed    = errors.New("persistence failed")
 )
 
+// 弹幕发送相关领域错误。
+var (
+	ErrUnauthorizedWS = errors.New("authentication required")
+)
+
 // rateLimiter 基于内存的每用户频率限制。
 type rateLimiter struct {
 	mu             sync.Mutex
@@ -87,13 +92,14 @@ func (rl *rateLimiter) Allow(userID string) bool {
 //   - 然后关闭 danmakuChan（确保 no send on closed channel）
 //   - 最后等待 consumer 排空
 type DanmakuService struct {
-	store       store.Store
-	hub         *websocket.Hub
-	danmakuChan chan model.Danmaku
-	wg          sync.WaitGroup
-	closed      atomic.Bool
-	rateLimiter *rateLimiter
-	hasDSN      bool
+	store            store.Store
+	hub              *websocket.Hub
+	danmakuChan      chan model.Danmaku
+	wg               sync.WaitGroup
+	closed           atomic.Bool
+	rateLimiter      *rateLimiter
+	hasDSN           bool
+	roomStatusGetter model.RoomStatusGetter
 
 	// 接受/在途状态机
 	// 使用 atomic.Int64 避免 sync.WaitGroup.Add 与 Wait 的非法并发
@@ -101,13 +107,14 @@ type DanmakuService struct {
 	inflight  atomic.Int64
 }
 
-func NewDanmakuService(s store.Store, hub *websocket.Hub, asyncBufferSize int, msgsPerSec float64, hasDSN bool) *DanmakuService {
+func NewDanmakuService(s store.Store, hub *websocket.Hub, asyncBufferSize int, msgsPerSec float64, hasDSN bool, roomStatusGetter model.RoomStatusGetter) *DanmakuService {
 	svc := &DanmakuService{
-		store:       s,
-		hub:         hub,
-		danmakuChan: nil,
-		rateLimiter: newRateLimiter(msgsPerSec),
-		hasDSN:      hasDSN,
+		store:            s,
+		hub:              hub,
+		danmakuChan:      nil,
+		rateLimiter:      newRateLimiter(msgsPerSec),
+		hasDSN:           hasDSN,
+		roomStatusGetter: roomStatusGetter,
 	}
 	svc.accepting.Store(true)
 	if asyncBufferSize > 0 {
@@ -143,32 +150,77 @@ func (s *DanmakuService) danmakuConsumer() {
 // 支持两种格式：
 //   - 新信封格式：{"type":"danmaku","payload":{...}}
 //   - 旧裸格式：{"content":"...","user_id":"...","request_id":"..."}
-func (s *DanmakuService) HandleMessage(roomID string, data []byte) model.HandleResult {
-	// 尝试解析为信封格式
+//
+// actor 参数提供认证身份：
+//   - actor.Authenticated == true：强制使用 actor.UserID 覆盖客户端 user_id
+//   - actor.Authenticated == false：返回 unauthorized 错误
+func (s *DanmakuService) HandleMessage(roomID string, actor model.Actor, data []byte) model.HandleResult {
+	// 1. 解析消息（先解析以获取 request_id）
+	var req CreateDanmakuRequest
 	var env model.MessageEnvelope
 	if err := json.Unmarshal(data, &env); err == nil && env.Type == model.MsgTypeDanmaku {
 		data = env.Payload
 	}
+	// 先做初步解析获取 request_id（即使后续校验失败也需要回填）
+	_ = json.Unmarshal(data, &req)
+	req.RoomID = roomID
 
-	var req CreateDanmakuRequest
+	// 2. 未认证用户不能发送弹幕
+	if !actor.Authenticated {
+		return model.HandleResult{
+			RequestID: req.RequestID,
+			OK:        false,
+			ErrorCode: model.ErrCodeUnauthorized,
+			Reason:    "authentication required",
+		}
+	}
+
+	// 3. 检查房间状态（每次发送时验证）
+	if s.roomStatusGetter != nil {
+		status, err := s.roomStatusGetter.GetStatus(roomID)
+		if err != nil {
+			slog.Warn("查询房间状态失败", "room_id", roomID, "error", err)
+			code := model.ErrCodeRoomNotFound
+			if errors.Is(err, ErrRoomNotFound) {
+				code = model.ErrCodeRoomNotFound
+			} else {
+				code = model.ErrCodePersistenceUnavail
+			}
+			return model.HandleResult{RequestID: req.RequestID, OK: false, ErrorCode: code, Reason: err.Error()}
+		}
+		switch status {
+		case "":
+			return model.HandleResult{RequestID: req.RequestID, OK: false, ErrorCode: model.ErrCodeRoomNotFound, Reason: "room not found"}
+		case model.RoomStatusBanned:
+			return model.HandleResult{RequestID: req.RequestID, OK: false, ErrorCode: model.ErrCodeRoomBanned, Reason: "room is banned"}
+		case model.RoomStatusPending, model.RoomStatusEnded:
+			return model.HandleResult{RequestID: req.RequestID, OK: false, ErrorCode: model.ErrCodeRoomNotLive, Reason: "room is not live"}
+		}
+	}
+
+	// 4. 完整解析请求
 	if err := json.Unmarshal(data, &req); err != nil {
 		return model.HandleResult{
+			RequestID: req.RequestID,
 			OK:        false,
-			ErrorCode: "parse_error",
+			ErrorCode: model.ErrCodeValidationError,
 			Reason:    "invalid JSON: " + err.Error(),
 		}
 	}
 	req.RoomID = roomID
+	// 强制使用认证身份覆盖客户端传入的 user_id
+	req.UserID = actor.UserID
 
 	dm, persistence, err := s.createAndBroadcast(req)
 	if err != nil {
 		slog.Warn("WS 弹幕校验不通过",
 			"room_id", roomID,
+			"user_id", actor.UserID,
 			"error", err,
 		)
-		code := "validation_error"
+		code := model.ErrCodeValidationError
 		if errors.Is(err, ErrPersistenceQueueFull) || errors.Is(err, ErrPersistenceFailed) {
-			code = "persistence_unavailable"
+			code = model.ErrCodePersistenceUnavail
 		}
 		return model.HandleResult{
 			RequestID: req.RequestID,

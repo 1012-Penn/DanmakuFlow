@@ -12,8 +12,12 @@ import (
 )
 
 // MessageHandler 处理从 WebSocket 收到的消息，支持历史查询。
+//
+// HandleMessage 接收 Actor 提供认证身份：
+//   - actor.Authenticated == true：业务层应使用 actor.UserID 覆盖客户端 user_id
+//   - actor.Authenticated == false：业务层应拒绝未认证的发送请求
 type MessageHandler interface {
-	HandleMessage(roomID string, data []byte) model.HandleResult
+	HandleMessage(roomID string, actor model.Actor, data []byte) model.HandleResult
 	// QueryHistory 查询断线期间的消息，用于重连补偿。
 	QueryHistory(roomID string, sinceTime time.Time, lastID string, limit int) ([]model.Danmaku, error)
 }
@@ -27,8 +31,9 @@ type Client struct {
 	handler  MessageHandler
 	clientIP string
 
-	UserID   string // 认证用户的 ID，"" 表示匿名
-	Username string // 认证用户的用户名，"" 表示匿名
+	// Actor 保存当前连接的身份认证信息。
+	// Actor.Authenticated == false 表示匿名用户（仅能观看）。
+	Actor model.Actor
 
 	done     chan struct{}
 	stopOnce sync.Once
@@ -73,7 +78,7 @@ func (c *Client) readPump() {
 		if err != nil {
 			break
 		}
-		result := c.handler.HandleMessage(c.room.ID, msg)
+		result := c.handler.HandleMessage(c.room.ID, c.Actor, msg)
 		c.sendResult(result)
 	}
 }

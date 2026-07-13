@@ -33,6 +33,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -58,6 +59,12 @@ var (
 	trackMsgs   = flag.Bool("track", true, "启用消息 ID 追踪（精确丢失率和延迟）")
 	httpRate    = flag.Int("http-qps", 50, "HTTP API 目标 QPS（仅在 http-only 时使用）")
 	verbose     = flag.Bool("v", false, "详细日志（打印每条错误）")
+
+	// 认证和房间参数
+	token     = flag.String("token", "", "JWT token（空将自动注册）")
+	benchUser = flag.String("bench-user", "benchmark", "压测用用户名")
+	benchPass = flag.String("bench-pass", "benchpass123", "压测用密码")
+	autoRoom  = flag.Bool("auto-room", true, "自动创建并启动压测房间")
 )
 
 // 全局原子计数器
@@ -111,7 +118,99 @@ func main() {
 		return
 	}
 
+	// 自动获取 JWT 并确保房间就绪
+	if err := ensureSetup(); err != nil {
+		fmt.Fprintf(os.Stderr, "❌ 压测前准备失败: %v\n", err)
+		os.Exit(1)
+	}
+
 	runWSBenchmark()
+}
+
+// ensureSetup 自动获取 JWT 并创建/启动房间。
+func ensureSetup() error {
+	// 如果没有提供 token，自动注册并登录
+	if *token == "" {
+		fmt.Println("🔑 未提供 token，尝试自动注册...")
+		// 注册
+		regBody := fmt.Sprintf(`{"username":"%s","password":"%s"}`, *benchUser, *benchPass)
+		regURL := fmt.Sprintf("http://%s/api/auth/register", *serverAddr)
+		resp, err := http.Post(regURL, "application/json", strings.NewReader(regBody))
+		if err != nil {
+			return fmt.Errorf("注册请求失败: %w", err)
+		}
+		// 如果 409 (已存在)，尝试登录
+		if resp.StatusCode == http.StatusConflict {
+			resp.Body.Close()
+			loginBody := fmt.Sprintf(`{"username":"%s","password":"%s"}`, *benchUser, *benchPass)
+			loginURL := fmt.Sprintf("http://%s/api/auth/login", *serverAddr)
+			resp, err = http.Post(loginURL, "application/json", strings.NewReader(loginBody))
+			if err != nil {
+				return fmt.Errorf("登录请求失败: %w", err)
+			}
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+			return fmt.Errorf("认证失败，HTTP %d", resp.StatusCode)
+		}
+		var result map[string]interface{}
+		json.NewDecoder(resp.Body).Decode(&result)
+		if t, ok := result["token"].(string); ok {
+			*token = t
+			fmt.Printf("✅ 获取 JWT 成功 (user=%s)\n", *benchUser)
+		} else {
+			return fmt.Errorf("响应中未找到 token")
+		}
+	}
+
+	// 自动创建并启动房间
+	if *autoRoom {
+		fmt.Printf("📋 确保房间 %s 就绪...\n", *roomID)
+		// 先检查房间是否存在
+		getURL := fmt.Sprintf("http://%s/api/rooms/%s", *serverAddr, *roomID)
+		getResp, err := http.Get(getURL)
+		if err == nil && getResp.StatusCode == http.StatusOK {
+			getResp.Body.Close()
+			// 房间已存在，尝试启动它
+			startURL := fmt.Sprintf("http://%s/api/rooms/%s/start", *serverAddr, *roomID)
+			startReq, _ := http.NewRequest("POST", startURL, nil)
+			startReq.Header.Set("Authorization", "Bearer "+*token)
+			startResp, _ := http.DefaultClient.Do(startReq)
+			if startResp != nil {
+				startResp.Body.Close()
+			}
+			fmt.Printf("✅ 房间 %s 已就绪\n", *roomID)
+			return nil
+		}
+		if getResp != nil {
+			getResp.Body.Close()
+		}
+
+		// 创建房间
+		createBody := fmt.Sprintf(`{"title":"%s"}`, *roomID)
+		createURL := fmt.Sprintf("http://%s/api/rooms", *serverAddr)
+		createReq, _ := http.NewRequest("POST", createURL, strings.NewReader(createBody))
+		createReq.Header.Set("Content-Type", "application/json")
+		createReq.Header.Set("Authorization", "Bearer "+*token)
+		createResp, err := http.DefaultClient.Do(createReq)
+		if err != nil {
+			return fmt.Errorf("创建房间失败: %w", err)
+		}
+		createResp.Body.Close()
+
+		// 启动房间
+		startURL := fmt.Sprintf("http://%s/api/rooms/%s/start", *serverAddr, *roomID)
+		startReq, _ := http.NewRequest("POST", startURL, nil)
+		startReq.Header.Set("Authorization", "Bearer "+*token)
+		startResp, err := http.DefaultClient.Do(startReq)
+		if err != nil {
+			return fmt.Errorf("启动房间失败: %w", err)
+		}
+		startResp.Body.Close()
+		fmt.Printf("✅ 房间 %s 创建并启动成功\n", *roomID)
+	}
+
+	return nil
 }
 
 // ──────────── WebSocket 压测 ────────────
@@ -185,6 +284,9 @@ func runWSBenchmark() {
 
 func runBot(id int, isTalker bool, tracker *BenchmarkTracker) {
 	wsURL := fmt.Sprintf("ws://%s/ws?room_id=%s", *serverAddr, *roomID)
+	if *token != "" {
+		wsURL += "&token=" + url.QueryEscape(*token)
+	}
 
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
@@ -425,17 +527,21 @@ func runHTTPBenchmark() {
 
 func sendHTTP() {
 	url := fmt.Sprintf("http://%s/api/room/%s/danmaku", *serverAddr, *roomID)
-	userID := fmt.Sprintf("http_bench_%d", time.Now().UnixNano()%1000)
 
 	body := map[string]string{
 		"content": danmakuContents[time.Now().UnixNano()%int64(len(danmakuContents))],
-		"user_id": userID,
 		"color":   "#ffffff",
 		"type":    "scroll",
 	}
 	data, _ := json.Marshal(body)
 
-	resp, err := http.Post(url, "application/json", bytes.NewReader(data))
+	req, _ := http.NewRequest("POST", url, bytes.NewReader(data))
+	req.Header.Set("Content-Type", "application/json")
+	if *token != "" {
+		req.Header.Set("Authorization", "Bearer "+*token)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
 	httpSentCount.Add(1)
 	if err != nil {
 		httpErrCount.Add(1)
@@ -449,6 +555,3 @@ func sendHTTP() {
 		httpErrCount.Add(1)
 	}
 }
-
-// compile-time assertion that benchmark builds correctly
-var _ = time.Second

@@ -55,6 +55,7 @@ services:
       REDIS_INSTANCE_ID_PREFIX: "danmaku-a"
       LOG_LEVEL: "info"
       LOG_FORMAT: "json"
+      JWT_SECRET: "danmakuflow-docker-secret-do-not-use-in-production"
     depends_on:
       mysql:
         condition: service_healthy
@@ -83,6 +84,7 @@ services:
       REDIS_INSTANCE_ID_PREFIX: "danmaku-b"
       LOG_LEVEL: "info"
       LOG_FORMAT: "json"
+      JWT_SECRET: "danmakuflow-docker-secret-do-not-use-in-production"
     depends_on:
       mysql:
         condition: service_healthy

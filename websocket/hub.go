@@ -21,10 +21,10 @@ const (
 	defaultSendBufferSize      = 256
 )
 
-// AuthValidator 验证 JWT token 返回用户 claims。
+// AuthValidator 验证 JWT token 返回 Actor。
 // 定义在 websocket 包中，由 service.AuthService 实现。
 type AuthValidator interface {
-	ValidateToken(tokenString string) (*model.UserClaims, error)
+	ValidateToken(tokenString string) (*model.Actor, error)
 }
 
 // Config 存放 WebSocket 层所有可配置参数。
@@ -163,9 +163,10 @@ type Hub struct {
 	counterMu     sync.Mutex
 	roomConnCount map[string]int64
 
-	checkOrigin   func(r *http.Request) bool
-	shuttingDown  atomic.Bool
-	authValidator AuthValidator
+	checkOrigin      func(r *http.Request) bool
+	shuttingDown     atomic.Bool
+	authValidator    AuthValidator
+	roomStatusGetter model.RoomStatusGetter
 }
 
 func NewHub() *Hub {
@@ -206,6 +207,11 @@ func NewHubWithConfig(cfg Config, redisClient *redisclient.Client) *Hub {
 // SetAuthValidator 设置 JWT 验证器，供 WebSocket 握手时认证。
 func (h *Hub) SetAuthValidator(v AuthValidator) {
 	h.authValidator = v
+}
+
+// SetRoomStatusGetter 设置房间状态查询器，供 WebSocket 握手时检查房间状态。
+func (h *Hub) SetRoomStatusGetter(g model.RoomStatusGetter) {
+	h.roomStatusGetter = g
 }
 
 // BroadcastToRoom 向指定房间广播消息，同时通过 Redis 跨实例广播。

@@ -41,7 +41,7 @@ func validRequest() CreateDanmakuRequest {
 
 func TestPersistenceFailureIsReturned(t *testing.T) {
 	s := &testStore{MemoryStore: store.New(), addErr: errors.New("db down")}
-	svc := NewDanmakuService(s, websocket.NewHub(), 0, 0, true)
+	svc := NewDanmakuService(s, websocket.NewHub(), 0, 0, true, nil)
 	if _, err := svc.CreateDanmaku(validRequest()); !errors.Is(err, ErrPersistenceFailed) {
 		t.Fatalf("expected persistence failure, got %v", err)
 	}
@@ -49,7 +49,7 @@ func TestPersistenceFailureIsReturned(t *testing.T) {
 
 func TestAsyncQueueFullIsReturned(t *testing.T) {
 	s := &testStore{MemoryStore: store.New(), started: make(chan struct{}, 1), unblock: make(chan struct{})}
-	svc := NewDanmakuService(s, websocket.NewHub(), 1, 0, true)
+	svc := NewDanmakuService(s, websocket.NewHub(), 1, 0, true, nil)
 
 	if _, err := svc.CreateDanmaku(validRequest()); err != nil {
 		t.Fatal(err)

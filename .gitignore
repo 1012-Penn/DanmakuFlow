@@ -1,6 +1,7 @@
 # Compiled binary
 danmaku
 danmaku.exe
+benchmark
 
 # Go workspace
 go.work

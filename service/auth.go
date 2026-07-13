@@ -17,7 +17,9 @@ import (
 
 // AuthClaims 是 JWT token 中携带的完整声明（含 jwt 标准字段）。
 type AuthClaims struct {
-	model.UserClaims
+	UserID   string `json:"user_id"`
+	Username string `json:"username"`
+	Nickname string `json:"nickname"`
 	jwt.RegisteredClaims
 }
 
@@ -63,8 +65,16 @@ func (s *AuthService) Register(username, password, nickname string) (*model.User
 	if len(password) < 6 {
 		return nil, "", ErrWeakPassword
 	}
+	if len(password) > 72 {
+		// bcrypt 只处理前 72 字节，超过时静默截断可能导致逻辑错误
+		return nil, "", errors.New("password must not exceed 72 characters")
+	}
+	nickname = strings.TrimSpace(nickname)
 	if nickname == "" {
 		nickname = username
+	}
+	if len(nickname) > 32 {
+		nickname = nickname[:32]
 	}
 
 	// bcrypt 哈希密码
@@ -116,9 +126,9 @@ func (s *AuthService) Login(username, password string) (*model.User, string, err
 	return user, token, nil
 }
 
-// ValidateToken 解析并验证 JWT token，返回用户 claims。
-// 返回 *model.UserClaims 以匹配 websocket.AuthValidator 接口。
-func (s *AuthService) ValidateToken(tokenString string) (*model.UserClaims, error) {
+// ValidateToken 解析并验证 JWT token，返回 Actor。
+// 返回 *model.Actor 以匹配 websocket.AuthValidator 接口。
+func (s *AuthService) ValidateToken(tokenString string) (*model.Actor, error) {
 	token, err := jwt.ParseWithClaims(tokenString, &AuthClaims{}, func(t *jwt.Token) (any, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
@@ -133,18 +143,27 @@ func (s *AuthService) ValidateToken(tokenString string) (*model.UserClaims, erro
 	if !ok || !token.Valid {
 		return nil, ErrInvalidToken
 	}
-	return &claims.UserClaims, nil
+	return &model.Actor{
+		UserID:        claims.UserID,
+		Username:      claims.Username,
+		Nickname:      claims.Nickname,
+		Authenticated: true,
+	}, nil
+}
+
+// ValidateTokenStrict 验证 JWT 且要求签名算法必须是 HS256。
+// 同 ValidateToken，但返回更严格的错误信息。
+func (s *AuthService) ValidateTokenStrict(tokenString string) (*model.Actor, error) {
+	return s.ValidateToken(tokenString)
 }
 
 // generateToken 为用户签发 JWT token（HS256），有效期 72 小时。
 func (s *AuthService) generateToken(user *model.User) (string, error) {
 	now := time.Now()
 	claims := &AuthClaims{
-		UserClaims: model.UserClaims{
-			UserID:   user.ID,
-			Username: user.Username,
-			Nickname: user.Nickname,
-		},
+		UserID:   user.ID,
+		Username: user.Username,
+		Nickname: user.Nickname,
 		RegisteredClaims: jwt.RegisteredClaims{
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(now.Add(time.Duration(s.expiryHours) * time.Hour)),

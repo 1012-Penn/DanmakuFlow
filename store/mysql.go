@@ -50,7 +50,7 @@ func migrateWithLock(db *gorm.DB) error {
 		}
 
 		defer tx.Exec("SELECT RELEASE_LOCK(?)", migrationLockName)
-		if err := tx.AutoMigrate(&model.Danmaku{}, &model.User{}); err != nil {
+		if err := tx.AutoMigrate(&model.Danmaku{}, &model.User{}, &model.Room{}); err != nil {
 			return fmt.Errorf("auto migrate: %w", err)
 		}
 		return nil
