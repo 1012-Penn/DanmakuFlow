@@ -32,6 +32,7 @@ type CreateDanmakuRequest struct {
 var (
 	ErrPersistenceQueueFull = errors.New("persistence queue is full")
 	ErrPersistenceFailed    = errors.New("persistence failed")
+	ErrRoomNotLive          = errors.New("room is not live")
 )
 
 // 弹幕发送相关领域错误。
@@ -89,8 +90,12 @@ func (rl *rateLimiter) Allow(userID string) bool {
 //   - 正常运行时 accepting=true，创建弹幕时登记 inflight，完成后释放
 //   - Shutdown 先将 accepting=false，禁止新请求
 //   - 等待所有 inflight 完成
-//   - 然后关闭 danmakuChan（确保 no send on closed channel）
+//   - 然后关闭 producer / danmakuChan（确保 no send on closed channel）
 //   - 最后等待 consumer 排空
+//
+// Kafka producer 与 danmakuChan 是互斥的：
+//   - kafkaProducer != nil → 使用 Kafka 作为持久化路径，danmakuChan 不创建
+//   - kafkaProducer == nil → 使用 danmakuChan + 直写 MySQL（现有行为不变）
 type DanmakuService struct {
 	store            store.Store
 	hub              *websocket.Hub
@@ -100,6 +105,10 @@ type DanmakuService struct {
 	rateLimiter      *rateLimiter
 	hasDSN           bool
 	roomStatusGetter model.RoomStatusGetter
+	kafkaProducer    KafkaProducerInterface // nil = 不使用 Kafka
+	kafkaBrokers     []string               // Kafka broker 列表，用于 Ping
+	kafkaPingFn      func() bool            // Ping 函数，由内部或测试注入
+	instanceID       string                 // 实例 ID，写入 Kafka event
 
 	// 接受/在途状态机
 	// 使用 atomic.Int64 避免 sync.WaitGroup.Add 与 Wait 的非法并发
@@ -107,7 +116,7 @@ type DanmakuService struct {
 	inflight  atomic.Int64
 }
 
-func NewDanmakuService(s store.Store, hub *websocket.Hub, asyncBufferSize int, msgsPerSec float64, hasDSN bool, roomStatusGetter model.RoomStatusGetter) *DanmakuService {
+func NewDanmakuService(s store.Store, hub *websocket.Hub, asyncBufferSize int, msgsPerSec float64, hasDSN bool, roomStatusGetter model.RoomStatusGetter, kafkaProducer KafkaProducerInterface, kafkaBrokers []string, instanceID string) *DanmakuService {
 	svc := &DanmakuService{
 		store:            s,
 		hub:              hub,
@@ -115,9 +124,19 @@ func NewDanmakuService(s store.Store, hub *websocket.Hub, asyncBufferSize int, m
 		rateLimiter:      newRateLimiter(msgsPerSec),
 		hasDSN:           hasDSN,
 		roomStatusGetter: roomStatusGetter,
+		kafkaProducer:    kafkaProducer,
+		kafkaBrokers:     kafkaBrokers,
+		instanceID:       instanceID,
+		kafkaPingFn: func() bool {
+			if len(kafkaBrokers) == 0 {
+				return false
+			}
+			return KafkaPing(kafkaBrokers)
+		},
 	}
 	svc.accepting.Store(true)
-	if asyncBufferSize > 0 {
+	// Kafka 启用时 danmakuChan 不创建，持久化由 Kafka SyncProducer 完成
+	if kafkaProducer == nil && asyncBufferSize > 0 {
 		svc.danmakuChan = make(chan model.Danmaku, asyncBufferSize)
 		metrics.AsyncChanCap.Set(float64(asyncBufferSize))
 		svc.wg.Add(1)
@@ -175,26 +194,13 @@ func (s *DanmakuService) HandleMessage(roomID string, actor model.Actor, data []
 		}
 	}
 
-	// 3. 检查房间状态（每次发送时验证）
-	if s.roomStatusGetter != nil {
-		status, err := s.roomStatusGetter.GetStatus(roomID)
-		if err != nil {
-			slog.Warn("查询房间状态失败", "room_id", roomID, "error", err)
-			code := model.ErrCodeRoomNotFound
-			if errors.Is(err, ErrRoomNotFound) {
-				code = model.ErrCodeRoomNotFound
-			} else {
-				code = model.ErrCodePersistenceUnavail
-			}
-			return model.HandleResult{RequestID: req.RequestID, OK: false, ErrorCode: code, Reason: err.Error()}
-		}
-		switch status {
-		case "":
-			return model.HandleResult{RequestID: req.RequestID, OK: false, ErrorCode: model.ErrCodeRoomNotFound, Reason: "room not found"}
-		case model.RoomStatusBanned:
-			return model.HandleResult{RequestID: req.RequestID, OK: false, ErrorCode: model.ErrCodeRoomBanned, Reason: "room is banned"}
-		case model.RoomStatusPending, model.RoomStatusEnded:
-			return model.HandleResult{RequestID: req.RequestID, OK: false, ErrorCode: model.ErrCodeRoomNotLive, Reason: "room is not live"}
+	// 3. HTTP 与 WebSocket 共享同一套可发送性校验。
+	if err := s.validateRoomForSend(roomID); err != nil {
+		return model.HandleResult{
+			RequestID: req.RequestID,
+			OK:        false,
+			ErrorCode: roomSendErrorCode(err),
+			Reason:    err.Error(),
 		}
 	}
 
@@ -218,14 +224,10 @@ func (s *DanmakuService) HandleMessage(roomID string, actor model.Actor, data []
 			"user_id", actor.UserID,
 			"error", err,
 		)
-		code := model.ErrCodeValidationError
-		if errors.Is(err, ErrPersistenceQueueFull) || errors.Is(err, ErrPersistenceFailed) {
-			code = model.ErrCodePersistenceUnavail
-		}
 		return model.HandleResult{
 			RequestID: req.RequestID,
 			OK:        false,
-			ErrorCode: code,
+			ErrorCode: roomSendErrorCode(err),
 			Reason:    err.Error(),
 		}
 	}
@@ -241,8 +243,57 @@ func (s *DanmakuService) HandleMessage(roomID string, actor model.Actor, data []
 }
 
 func (s *DanmakuService) CreateDanmaku(req CreateDanmakuRequest) (model.Danmaku, error) {
+	if err := s.validateRoomForSend(req.RoomID); err != nil {
+		return model.Danmaku{}, err
+	}
 	dm, _, err := s.createAndBroadcast(req)
 	return dm, err
+}
+
+// validateRoomForSend defines the business rule shared by HTTP and WebSocket
+// producers. History reads intentionally do not use this rule: ended rooms keep
+// their public replay value.
+func (s *DanmakuService) validateRoomForSend(roomID string) error {
+	if s.roomStatusGetter == nil {
+		return nil
+	}
+
+	status, err := s.roomStatusGetter.GetStatus(roomID)
+	if err != nil {
+		if errors.Is(err, ErrRoomNotFound) {
+			return ErrRoomNotFound
+		}
+		slog.Warn("查询房间状态失败", "room_id", roomID, "error", err)
+		return fmt.Errorf("%w: room status lookup: %v", ErrPersistenceFailed, err)
+	}
+
+	switch status {
+	case model.RoomStatusLive:
+		return nil
+	case "":
+		return ErrRoomNotFound
+	case model.RoomStatusBanned:
+		return ErrRoomBanned
+	case model.RoomStatusPending, model.RoomStatusEnded:
+		return ErrRoomNotLive
+	default:
+		return ErrRoomNotLive
+	}
+}
+
+func roomSendErrorCode(err error) string {
+	switch {
+	case errors.Is(err, ErrRoomNotFound):
+		return model.ErrCodeRoomNotFound
+	case errors.Is(err, ErrRoomBanned):
+		return model.ErrCodeRoomBanned
+	case errors.Is(err, ErrRoomNotLive):
+		return model.ErrCodeRoomNotLive
+	case errors.Is(err, ErrPersistenceQueueFull), errors.Is(err, ErrPersistenceFailed):
+		return model.ErrCodePersistenceUnavail
+	default:
+		return model.ErrCodeValidationError
+	}
 }
 
 func (s *DanmakuService) ListByRoom(roomID string, limit int) []model.Danmaku {
@@ -259,6 +310,19 @@ func (s *DanmakuService) HasStoreDSN() bool {
 
 func (s *DanmakuService) PingStore() bool {
 	return s.store.Ping()
+}
+
+// HasKafkaConfig 返回是否配置了 Kafka producer。
+func (s *DanmakuService) HasKafkaConfig() bool {
+	return s.kafkaProducer != nil
+}
+
+// PingKafka 检查 Kafka 连通性（仅当配置了 Kafka 时）。
+func (s *DanmakuService) PingKafka() bool {
+	if s.kafkaProducer == nil || s.kafkaPingFn == nil {
+		return false
+	}
+	return s.kafkaPingFn()
 }
 
 // QueryHistory 查询指定房间在 sinceTime+lastID 之后的弹幕历史。
@@ -330,7 +394,15 @@ func (s *DanmakuService) Shutdown(ctx context.Context) error {
 	}
 	slog.Info("所有在途请求已完成")
 
-	// 3. 关闭 danmakuChan（此时保证无新写入）
+	// 3. 关闭 Kafka producer（flush 缓冲区）
+	if s.kafkaProducer != nil {
+		if err := s.kafkaProducer.Close(); err != nil {
+			slog.Warn("Kafka producer 关闭失败", "error", err)
+		}
+		slog.Info("Kafka producer 已关闭")
+	}
+
+	// 5. 关闭 danmakuChan（此时保证无新写入）
 	if !s.closed.CompareAndSwap(false, true) {
 		return nil
 	}
@@ -398,7 +470,21 @@ func (s *DanmakuService) createAndBroadcast(req CreateDanmakuRequest) (model.Dan
 	}
 
 	persistence := "persisted"
-	if s.danmakuChan != nil {
+	if s.kafkaProducer != nil {
+		// Kafka 路径：同步 produce，Kafka 确认后才继续广播
+		produceCtx, produceCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := s.kafkaProducer.Produce(produceCtx, dm); err != nil {
+			produceCancel()
+			slog.Error("Kafka produce failed",
+				"dm_id", dm.ID,
+				"room_id", dm.RoomID,
+				"error", err,
+			)
+			return model.Danmaku{}, "", fmt.Errorf("%w: kafka: %v", ErrPersistenceFailed, err)
+		}
+		produceCancel()
+		persistence = "persisted"
+	} else if s.danmakuChan != nil {
 		select {
 		case s.danmakuChan <- dm:
 			persistence = "buffered"

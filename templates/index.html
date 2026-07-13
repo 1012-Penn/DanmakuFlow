@@ -1,353 +1,45 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="zh-CN">
 <head>
-    <meta charset="UTF-8">
-    <title>Danmaku - Room</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: system-ui, sans-serif; padding: 20px; background: #1a1a2e; color: #fff; }
-        #room-header { font-size: 18px; color: #e94560; margin-bottom: 12px; }
-
-        /* ---- 弹幕播放区 ---- */
-        #box {
-            position: relative;
-            width: 100%; height: 400px; overflow: hidden;
-            border: 1px solid #333; border-radius: 8px;
-            background: #16213e; margin-bottom: 12px;
-        }
-
-        /* 所有弹幕共用的基础样式 */
-        .danmaku-item {
-            position: absolute;
-            white-space: nowrap;
-            pointer-events: none;
-        }
-
-        /* 滚动弹幕：从容器右侧外 → 左侧外 */
-        .danmaku-scroll {
-            animation: scrollRight 5s linear forwards;
-        }
-        @keyframes scrollRight {
-            from { left: 100%; }
-            to   { left: -100%; }
-        }
-
-        /* 逆向滚动：从容器左侧外 → 右侧外 */
-        .danmaku-reverse {
-            animation: scrollLeft 5s linear forwards;
-        }
-        @keyframes scrollLeft {
-            from { left: -100%; }
-            to   { left: 100%; }
-        }
-
-        /* 顶部 / 底部固定：居中出现，停留后淡出 */
-        .danmaku-top,
-        .danmaku-bottom {
-            left: 50%; transform: translateX(-50%);
-            background: rgba(0,0,0,0.5); padding: 2px 12px; border-radius: 4px;
-            animation: fadeOut 4s ease-in forwards;
-        }
-        .danmaku-top    { top: 8px; }
-        .danmaku-bottom { bottom: 8px; }
-        @keyframes fadeOut {
-            0%, 70% { opacity: 1; }
-            100%    { opacity: 0; }
-        }
-
-        /* ---- 输入区 ---- */
-        #controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-        #input { padding: 10px; flex: 1; min-width: 200px; border-radius: 6px; border: none; }
-        #sendBtn { padding: 10px 20px; border-radius: 6px; border: none; background: #0f3460; color: #fff; cursor: pointer; }
-        #sendBtn:hover { background: #1a5276; }
-
-        select { padding: 10px; border-radius: 6px; border: none; background: #0f3460; color: #fff; }
-        select option { background: #1a1a2e; }
-
-        .status { font-size: 14px; color: #888; margin-top: 8px; }
-        .status.ok { color: #2ecc71; }
-        .status.error { color: #e94560; }
-        .error { color: #e94560; font-size: 18px; text-align: center; margin-top: 100px; }
-
-        /* ---- 用户栏 ---- */
-        #userbar {
-            font-size: 13px; color: #aaa; margin-bottom: 8px;
-            display: flex; justify-content: flex-end; gap: 12px; align-items: center;
-        }
-        #userbar .name { color: #e94560; }
-        #userbar .logout {
-            color: #888; cursor: pointer; text-decoration: underline;
-            font-size: 12px;
-        }
-        #userbar .logout:hover { color: #e94560; }
-    </style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DanmakuFlow | 直播间大厅</title>
+  <style>
+    :root { color-scheme: dark; --bg:#0c111b; --panel:#151d2b; --line:#293548; --text:#edf2f7; --muted:#94a3b8; --accent:#34d399; --danger:#fb7185; }
+    * { box-sizing:border-box; } body { margin:0; min-height:100vh; background:var(--bg); color:var(--text); font:15px/1.5 system-ui,-apple-system,"Microsoft YaHei",sans-serif; }
+    a { color:inherit; } .shell { width:min(1120px,calc(100% - 32px)); margin:0 auto; }
+    header { border-bottom:1px solid var(--line); background:#101722; } .topbar { min-height:68px; display:flex; align-items:center; justify-content:space-between; gap:16px; }
+    .brand { font-weight:700; font-size:19px; text-decoration:none; } .brand small { color:var(--accent); font-size:12px; margin-left:8px; font-weight:600; }
+    .user { color:var(--muted); display:flex; align-items:center; gap:12px; } button,.button { border:1px solid var(--line); border-radius:6px; padding:8px 13px; background:#202b3c; color:var(--text); cursor:pointer; font:inherit; text-decoration:none; }
+    button:hover,.button:hover { border-color:#51627a; } .primary { background:var(--accent); color:#06261d; border-color:var(--accent); font-weight:700; } .primary:hover { background:#6ee7b7; }
+    main { padding:48px 0 64px; } .eyebrow { color:var(--accent); font-size:13px; font-weight:700; } h1 { margin:8px 0; font-size:34px; letter-spacing:0; } .lead { color:var(--muted); margin:0; max-width:690px; }
+    .create { margin:28px 0 36px; border:1px solid var(--line); background:var(--panel); padding:20px; border-radius:8px; display:flex; gap:12px; align-items:center; justify-content:space-between; }
+    .create-copy strong { display:block; } .create-copy span { color:var(--muted); font-size:13px; } .create form { display:flex; gap:8px; } input { min-width:260px; padding:9px 10px; border:1px solid var(--line); border-radius:6px; color:var(--text); background:#0f1621; font:inherit; }
+    .section-head { display:flex; align-items:baseline; justify-content:space-between; gap:12px; margin-bottom:14px; } h2 { font-size:18px; margin:0; } .count { color:var(--muted); font-size:13px; }
+    #rooms { display:grid; grid-template-columns:repeat(auto-fill,minmax(250px,1fr)); gap:12px; } .room { border:1px solid var(--line); border-radius:8px; background:var(--panel); padding:17px; min-height:155px; display:flex; flex-direction:column; }
+    .room h3 { margin:10px 0 7px; font-size:17px; overflow-wrap:anywhere; } .room-id { color:var(--muted); font:12px ui-monospace,SFMono-Regular,monospace; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .room .button { margin-top:auto; text-align:center; }
+    .status { color:#052e20; background:var(--accent); border-radius:4px; width:max-content; padding:2px 7px; font-size:12px; font-weight:700; } .empty { padding:32px; border:1px dashed var(--line); color:var(--muted); text-align:center; }
+    .hidden { display:none !important; } .notice { color:var(--danger); font-size:13px; margin-top:8px; }
+    @media (max-width:680px) { .topbar,.create { align-items:flex-start; flex-direction:column; } .create form { width:100%; flex-wrap:wrap; } input { min-width:0; flex:1 1 100%; } h1 { font-size:28px; } }
+  </style>
 </head>
 <body>
-    <div id="userbar">
-        <span id="userDisplay"></span>
-        <span class="logout" id="logoutBtn" onclick="doLogout()" style="display:none">退出</span>
-    </div>
-    <h1>Danmaku</h1>
-    <div id="room-header">📺 房间: <span id="room-name">-</span></div>
-    <div id="box"></div>
-
-    <div id="controls">
-        <input id="input" type="text" placeholder="Type here..." />
-        <select id="typeSelect">
-            <option value="scroll">滚动</option>
-            <option value="top">顶部</option>
-            <option value="bottom">底部</option>
-            <option value="reverse">逆向</option>
-        </select>
-        <button id="sendBtn">Send</button>
-    </div>
-    <div id="status" class="status">Disconnected</div>
-
-    <script>
-        const params = new URLSearchParams(location.search);
-        const roomID = params.get('room');
-
-        if (!roomID) {
-            document.body.innerHTML = '<div class="error">❌ 请通过 ?room=xxx 指定房间号<br><small>例如: http://localhost:8080/?room=abc</small></div>';
-            throw new Error('room parameter required');
-        }
-
-        const box = document.getElementById('box');
-        const input = document.getElementById('input');
-        const typeSelect = document.getElementById('typeSelect');
-        const statusEl = document.getElementById('status');
-        document.getElementById('room-name').textContent = roomID;
-
-        // ---- 用户显示 ----
-        const token = localStorage.getItem('token');
-        const username = localStorage.getItem('username');
-        const nickname = localStorage.getItem('nickname');
-        const userDisplay = document.getElementById('userDisplay');
-        const logoutBtn = document.getElementById('logoutBtn');
-        if (token && username) {
-            userDisplay.innerHTML = '👤 <span class="name">' + (nickname || username) + '</span>';
-            logoutBtn.style.display = 'inline';
-        } else {
-            userDisplay.innerHTML = '<a href="/login" style="color:#e94560;text-decoration:none">登录</a>';
-        }
-        function doLogout() {
-            localStorage.removeItem('token');
-            localStorage.removeItem('username');
-            localStorage.removeItem('nickname');
-            location.reload();
-        }
-
-        // ---- 重连状态 ----
-        let ws = null;
-        let reconnectAttempts = 0;
-        let reconnectTimer = null;
-
-        // ---- 历史补偿追踪 ----
-        let lastMessageId = '';
-        let lastTimestamp = '';
-
-        // 实时广播与历史补偿共用同一套有界去重状态。
-        const renderedIds = new Set();
-        const renderedOrder = [];
-        const MAX_RENDERED_IDS = 10000;
-        const pendingRequests = new Map();
-        const clientUserId = 'web_' + Math.random().toString(36).slice(2, 10);
-
-        function newRequestId() {
-            if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
-            return Date.now().toString(36) + '_' + Math.random().toString(36).slice(2);
-        }
-
-        function advanceCursor(d) {
-            if (!d || !d.timestamp) return;
-            const nextMs = Date.parse(d.timestamp);
-            const currentMs = lastTimestamp ? Date.parse(lastTimestamp) : -1;
-            if (nextMs > currentMs || (nextMs === currentMs && (d.id || '') > lastMessageId)) {
-                lastTimestamp = d.timestamp;
-                lastMessageId = d.id || '';
-            }
-        }
-
-        function acceptDanmaku(d) {
-            if (!d) return false;
-            if (d.id && renderedIds.has(d.id)) return false;
-            if (d.id) {
-                renderedIds.add(d.id);
-                renderedOrder.push(d.id);
-                if (renderedOrder.length > MAX_RENDERED_IDS) {
-                    renderedIds.delete(renderedOrder.shift());
-                }
-            }
-            advanceCursor(d);
-            return true;
-        }
-
-        // ---- 弹幕海：密集行 + 多样变化 ----
-        const ROW_HEIGHT = 22;
-        const rowCount = Math.floor(box.clientHeight / ROW_HEIGHT);
-        const rowPositions = Array.from({ length: rowCount }, (_, i) => i * ROW_HEIGHT + 4);
-
-        function randRow() {
-            return rowPositions[Math.floor(Math.random() * rowPositions.length)];
-        }
-
-        function randDur() {
-            return (2.5 + Math.random() * 2).toFixed(1);
-        }
-
-        function randDelay() {
-            return (-Math.random() * 2.8).toFixed(1);
-        }
-
-        // ---- 渲染一条弹幕 ----
-        function renderDanmaku(d) {
-            const type = d.type || 'scroll';
-
-            const el = document.createElement('div');
-            el.className = 'danmaku-item';
-
-            if (type === 'scroll') {
-                el.style.top = randRow() + 'px';
-                el.style.animationDuration = randDur() + 's';
-                el.style.animationDelay = randDelay() + 's';
-                el.addEventListener('animationend', () => el.remove());
-                el.classList.add('danmaku-scroll');
-            } else if (type === 'reverse') {
-                el.style.top = randRow() + 'px';
-                el.style.animationDuration = randDur() + 's';
-                el.style.animationDelay = randDelay() + 's';
-                el.addEventListener('animationend', () => el.remove());
-                el.classList.add('danmaku-reverse');
-            } else {
-                el.addEventListener('animationend', () => el.remove());
-                el.classList.add('danmaku-' + type);
-            }
-
-            el.style.color = d.color || '#ffffff';
-            el.style.fontSize = (d.font_size || 25) + 'px';
-            el.textContent = d.content;
-            box.appendChild(el);
-        }
-
-        // ---- 创建 WebSocket 连接 ----
-        function connect() {
-            if (ws) { ws.onclose = null; ws.close(); ws = null; }
-
-            // 构建 WS URL，使用 location.host 避免硬编码
-            const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            let url = protocol + '//' + location.host + '/ws?room_id=' + encodeURIComponent(roomID);
-
-            // 携带 JWT token（如果已登录）
-            const tok = localStorage.getItem('token');
-            if (tok) {
-                url += '&token=' + encodeURIComponent(tok);
-            }
-
-            // 断线重连时携带历史补偿参数
-            if (reconnectAttempts > 0 && lastTimestamp) {
-                url += '&since_time=' + encodeURIComponent(lastTimestamp);
-                if (lastMessageId) {
-                    url += '&last_message_id=' + encodeURIComponent(lastMessageId);
-                }
-            }
-
-            ws = new WebSocket(url);
-
-            ws.onopen = function() {
-                statusEl.textContent = '✅ Connected to ' + roomID;
-                statusEl.className = 'status ok';
-                reconnectAttempts = 0;
-                if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-            };
-
-            ws.onclose = function() {
-                statusEl.textContent = '❌ Disconnected';
-                statusEl.className = 'status';
-                scheduleReconnect();
-            };
-
-            ws.onmessage = function(e) {
-                var env;
-                try { env = JSON.parse(e.data); } catch(_) { return; }
-
-                switch (env.type) {
-                    case 'broadcast':
-                        if (acceptDanmaku(env.payload)) {
-                            renderDanmaku(env.payload);
-                        }
-                        break;
-
-                    case 'history':
-                        if (env.payload && env.payload.danmaku) {
-                            // 历史补偿：按 message_id 去重
-                            env.payload.danmaku.forEach(function(d) {
-                                if (acceptDanmaku(d)) renderDanmaku(d);
-                            });
-                        }
-                        break;
-
-                    case 'ack':
-                        // 确认消息：可选在 status 显示
-                        if (env.payload && env.payload.ok) {
-                            if (env.payload.request_id) pendingRequests.delete(env.payload.request_id);
-                            statusEl.textContent = '✓ sent (' + (env.payload.message_id || '').slice(0, 8) + ')';
-                            statusEl.className = 'status ok';
-                        }
-                        break;
-
-                    case 'error':
-                        // 错误消息：在 status 显示原因
-                        if (env.payload) {
-                            if (env.payload.request_id) pendingRequests.delete(env.payload.request_id);
-                            statusEl.textContent = '✗ ' + (env.payload.message || env.payload.code || 'error');
-                            statusEl.className = 'status error';
-                        }
-                        break;
-                }
-            };
-        }
-
-        // ---- 指数退避重连 ----
-        function scheduleReconnect() {
-            if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-            reconnectAttempts++;
-            // 退避：1s, 2s, 4s, 8s, ... 最大 30s
-            var delay = Math.min(1000 * Math.pow(2, reconnectAttempts - 1), 30000);
-            // 加 ±20% jitter
-            delay = Math.round(delay * (0.8 + Math.random() * 0.4));
-
-            statusEl.textContent = '⏳ Reconnecting in ' + Math.round(delay / 1000) + 's... (#' + reconnectAttempts + ')';
-            statusEl.className = 'status';
-
-            reconnectTimer = setTimeout(function() { connect(); }, delay);
-        }
-
-        // ---- 发送弹幕 ----
-        function send() {
-            const text = input.value.trim();
-            if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
-
-            // 使用新信封格式（旧裸格式仍被服务端兼容）
-            const requestId = newRequestId();
-            pendingRequests.set(requestId, Date.now());
-            ws.send(JSON.stringify({
-                type: 'danmaku',
-                payload: {
-                    content: text,
-                    user_id: clientUserId,
-                    request_id: requestId,
-                    color: '#ffffff',
-                    type: typeSelect.value
-                }
-            }));
-            input.value = '';
-        }
-
-        document.getElementById('sendBtn').onclick = send;
-        input.onkeydown = function(e) { if (e.key === 'Enter') send(); };
-
-        // ---- 启动 ----
-        connect();
-    </script>
+  <header><div class="shell topbar"><a class="brand" href="/">DanmakuFlow <small>LIVE INTERACTION</small></a><div id="user" class="user"></div></div></header>
+  <main class="shell">
+    <div class="eyebrow">直播互动系统</div><h1>正在直播</h1><p class="lead">进入任意直播间观看实时弹幕。登录后可以创建自己的直播间，身份与房间状态由服务端统一校验。</p>
+    <section id="create" class="create hidden"><div class="create-copy"><strong>创建直播间</strong><span>创建后将进入准备状态，由房主开始直播。</span></div><form id="createForm"><input id="title" maxlength="100" placeholder="给直播间起个标题" required><button class="primary" type="submit">创建并进入</button></form></section>
+    <div class="section-head"><h2>直播中的房间</h2><span id="count" class="count">加载中</span></div><div id="rooms"></div><div id="notice" class="notice"></div>
+  </main>
+  <script>
+    const token = localStorage.getItem('token'); let me = null;
+    const nextLogin = () => '/login?next=' + encodeURIComponent(location.pathname + location.search);
+    async function api(path, options = {}) { const headers = {...(options.headers || {})}; if (token) headers.Authorization = 'Bearer ' + token; const resp = await fetch(path, {...options, headers}); const data = await resp.json().catch(() => ({})); if (!resp.ok) throw new Error(data.message || data.error || '请求失败'); return data; }
+    function escapeText(value) { const node = document.createElement('span'); node.textContent = value || ''; return node.textContent; }
+    function renderUser() { const el = document.getElementById('user'); if (!me) { el.innerHTML = `<span>游客可观看直播</span><a class="button" href="${nextLogin()}">登录 / 注册</a>`; return; } el.innerHTML = `<span>${escapeText(me.nickname || me.username)}</span><button id="logout">退出</button>`; document.getElementById('logout').onclick = () => { localStorage.clear(); location.reload(); }; document.getElementById('create').classList.remove('hidden'); }
+    function renderRooms(rooms) { const root = document.getElementById('rooms'); document.getElementById('count').textContent = `${rooms.length} 个直播间`; if (!rooms.length) { root.innerHTML = `<div class="empty">当前没有直播中的房间。${me ? '你可以先创建一个并开始直播。' : '登录后可以创建自己的直播间。'}</div>`; return; } root.innerHTML = ''; rooms.forEach(room => { const card = document.createElement('article'); card.className='room'; card.innerHTML = `<span class="status">直播中</span><h3></h3><div class="room-id"></div><a class="button">进入直播间</a>`; card.querySelector('h3').textContent=room.title; card.querySelector('.room-id').textContent='ID: '+room.id; card.querySelector('a').href='/room?room_id='+encodeURIComponent(room.id); root.appendChild(card); }); }
+    async function boot() { try { if (token) { const result = await api('/api/auth/me'); me = result.user; } } catch (_) { localStorage.clear(); } renderUser(); try { renderRooms(await api('/api/rooms?status=live&limit=20')); } catch (err) { document.getElementById('notice').textContent=err.message; document.getElementById('count').textContent='加载失败'; } }
+    document.getElementById('createForm').onsubmit = async event => { event.preventDefault(); const btn=event.target.querySelector('button'); btn.disabled=true; try { const room=await api('/api/rooms',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:document.getElementById('title').value.trim()})}); location.href='/room?room_id='+encodeURIComponent(room.id); } catch(err) { document.getElementById('notice').textContent=err.message; } finally { btn.disabled=false; } };
+    boot();
+  </script>
 </body>
 </html>

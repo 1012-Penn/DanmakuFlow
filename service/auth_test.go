@@ -232,6 +232,24 @@ func TestValidateWrongSigningMethod(t *testing.T) {
 	}
 }
 
+func TestValidateOnlyAcceptsHS256(t *testing.T) {
+	s := newTestAuthService()
+	claims := &AuthClaims{UserID: "test", Username: "test"}
+
+	for _, method := range []jwt.SigningMethod{jwt.SigningMethodHS384, jwt.SigningMethodHS512} {
+		t.Run(method.Alg(), func(t *testing.T) {
+			token := jwt.NewWithClaims(method, claims)
+			tokenString, err := token.SignedString([]byte("test-secret"))
+			if err != nil {
+				t.Fatalf("sign token: %v", err)
+			}
+			if _, err := s.ValidateToken(tokenString); err == nil {
+				t.Fatalf("%s token must be rejected", method.Alg())
+			}
+		})
+	}
+}
+
 func TestRegisterEmptyNicknameUsesUsername(t *testing.T) {
 	s := newTestAuthService()
 	user, _, err := s.Register("nonick", "pass123", "")

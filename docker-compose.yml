@@ -41,6 +41,29 @@ services:
     networks:
       - danmaku-net
 
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:latest
+    container_name: danmaku-kafka
+    ports:
+      - "9092:9092"
+    command:
+      - redpanda start
+      - --smp 1
+      - --memory 512M
+      - --reserve-memory 0M
+      - --overprovisioned
+      - --node-id 0
+      - --kafka-addr PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:9092
+      - --advertise-kafka-addr PLAINTEXT://redpanda:29092,OUTSIDE://localhost:9092
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+      start_period: 15s
+    networks:
+      - danmaku-net
+
   danmaku-a:
     build:
       context: .
@@ -56,10 +79,13 @@ services:
       LOG_LEVEL: "info"
       LOG_FORMAT: "json"
       JWT_SECRET: "danmakuflow-docker-secret-do-not-use-in-production"
+      KAFKA_BROKERS: "redpanda:29092"
     depends_on:
       mysql:
         condition: service_healthy
       redis:
+        condition: service_started
+      redpanda:
         condition: service_started
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/readyz"]
@@ -85,10 +111,13 @@ services:
       LOG_LEVEL: "info"
       LOG_FORMAT: "json"
       JWT_SECRET: "danmakuflow-docker-secret-do-not-use-in-production"
+      KAFKA_BROKERS: "redpanda:29092"
     depends_on:
       mysql:
         condition: service_healthy
       redis:
+        condition: service_started
+      redpanda:
         condition: service_started
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/readyz"]

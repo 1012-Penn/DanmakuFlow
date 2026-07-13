@@ -1,3 +1,5 @@
+//go:build ignore
+
 // Command integration 验证 DanmakuFlow 双实例跨实例广播功能。
 package main
 

@@ -33,6 +33,7 @@ type testHelper struct {
 	hub        *danmakuws.Hub
 	authSvc    *service.AuthService
 	roomSvc    *service.RoomService
+	roomStore  *store.MemoryRoomStore
 	danmakuSvc *service.DanmakuService
 }
 
@@ -54,7 +55,7 @@ func setupTest(t *testing.T) *testHelper {
 	// 服务层
 	authSvc := service.NewAuthService(userStore, "test-secret", 72)
 	roomSvc := service.NewRoomService(roomSt)
-	svc := service.NewDanmakuService(memStore, hub, 0, 0, false, roomSvc)
+	svc := service.NewDanmakuService(memStore, hub, 0, 0, false, roomSvc, nil, nil, "test")
 
 	// 注入 Hub
 	hub.SetAuthValidator(authSvc)
@@ -78,6 +79,7 @@ func setupTest(t *testing.T) *testHelper {
 	}
 
 	r.StaticFile("/", "./templates/index.html")
+	r.StaticFile("/room", "./templates/room.html")
 
 	server := httptest.NewServer(r)
 	t.Cleanup(server.Close)
@@ -87,6 +89,7 @@ func setupTest(t *testing.T) *testHelper {
 		hub:        hub,
 		authSvc:    authSvc,
 		roomSvc:    roomSvc,
+		roomStore:  roomSt,
 		danmakuSvc: svc,
 	}
 }
@@ -172,7 +175,7 @@ func TestMetricsEndpoint(t *testing.T) {
 	s := store.New()
 	roomSt := store.NewMemoryRoomStore()
 	roomSvc := service.NewRoomService(roomSt)
-	svc := service.NewDanmakuService(s, hub, 0, 0, false, roomSvc)
+	svc := service.NewDanmakuService(s, hub, 0, 0, false, roomSvc, nil, nil, "test")
 	h := handler.New(svc, hub, 20, "test-instance")
 	h.RegisterRoutes(r)
 	r.GET("/metrics", gin.WrapH(promhttp.HandlerFor(reg, promhttp.HandlerOpts{})))
@@ -281,10 +284,11 @@ func TestAuth(t *testing.T) {
 // TestCreateDanmaku 验证 HTTP 创建弹幕成功（带 JWT）。
 func TestCreateDanmaku(t *testing.T) {
 	th := setupTest(t)
-	_, token := th.registerUser(t, "danmakutest", "pass123")
+	userID, token := th.registerUser(t, "danmakutest", "pass123")
+	roomID := th.createAndStartRoom(t, userID, "HTTP 弹幕测试")
 
 	body := `{"content":"test message"}`
-	req, _ := http.NewRequest("POST", th.server.URL+"/api/room/abc/danmaku", strings.NewReader(body))
+	req, _ := http.NewRequest("POST", th.server.URL+"/api/room/"+roomID+"/danmaku", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := http.DefaultClient.Do(req)
@@ -295,7 +299,7 @@ func TestCreateDanmaku(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&result)
 	resp.Body.Close()
 	assert.Equal(t, "test message", result["content"])
-	assert.Equal(t, "abc", result["room_id"])
+	assert.Equal(t, roomID, result["room_id"])
 	assert.NotEmpty(t, result["id"])
 	assert.NotEmpty(t, result["timestamp"])
 }
@@ -314,10 +318,11 @@ func TestCreateDanmakuUnauthenticated(t *testing.T) {
 func TestCreateDanmakuUserIDOverride(t *testing.T) {
 	th := setupTest(t)
 	userID, token := th.registerUser(t, "override", "pass123")
+	roomID := th.createAndStartRoom(t, userID, "身份覆盖测试")
 
 	// 客户端在 JSON 中伪造其他用户的 ID
 	body := fmt.Sprintf(`{"content":"forged","user_id":"fake_user_id"}`)
-	req, _ := http.NewRequest("POST", th.server.URL+"/api/room/abc/danmaku", strings.NewReader(body))
+	req, _ := http.NewRequest("POST", th.server.URL+"/api/room/"+roomID+"/danmaku", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := http.DefaultClient.Do(req)
@@ -331,7 +336,7 @@ func TestCreateDanmakuUserIDOverride(t *testing.T) {
 	assert.Equal(t, userID, result["user_id"], "user_id 必须来自 JWT，不能来自客户端伪造")
 
 	// 验证数据库中也是正确的 user_id
-	list, _ := http.Get(th.server.URL + "/api/room/abc/danmaku")
+	list, _ := http.Get(th.server.URL + "/api/room/" + roomID + "/danmaku")
 	var listResult []map[string]interface{}
 	json.NewDecoder(list.Body).Decode(&listResult)
 	list.Body.Close()
@@ -343,7 +348,9 @@ func TestCreateDanmakuUserIDOverride(t *testing.T) {
 // TestListByRoom 验证按房间查询弹幕。
 func TestListByRoom(t *testing.T) {
 	th := setupTest(t)
-	_, token := th.registerUser(t, "listuser", "pass123")
+	userID, token := th.registerUser(t, "listuser", "pass123")
+	roomA := th.createAndStartRoom(t, userID, "列表 A")
+	roomB := th.createAndStartRoom(t, userID, "列表 B")
 
 	// 通过 HTTP 创建弹幕（需要 token）
 	post := func(roomID, content string) {
@@ -353,18 +360,65 @@ func TestListByRoom(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer "+token)
 		http.DefaultClient.Do(req)
 	}
-	post("abc", "msg1")
-	post("abc", "msg2")
-	post("def", "msg3")
+	post(roomA, "msg1")
+	post(roomA, "msg2")
+	post(roomB, "msg3")
 
 	// 查房间 abc
-	resp, _ := http.Get(th.server.URL + "/api/room/abc/danmaku")
+	resp, _ := http.Get(th.server.URL + "/api/room/" + roomA + "/danmaku")
 	var list []map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&list)
 	resp.Body.Close()
 	assert.Equal(t, 2, len(list))
 	assert.Equal(t, "msg1", list[0]["content"])
 	assert.Equal(t, "msg2", list[1]["content"])
+}
+
+func TestCreateDanmakuRejectsUnavailableRooms(t *testing.T) {
+	th := setupTest(t)
+	userID, token := th.registerUser(t, "roomstate", "pass123")
+	pending, err := th.roomSvc.Create(userID, "待开播")
+	assert.NoError(t, err)
+	ended := th.createAndStartRoom(t, userID, "已结束")
+	assert.NoError(t, th.roomSvc.EndRoom(ended, userID))
+	bannedID := "banned-room"
+	now := time.Now().UTC()
+	th.roomStore.MustCreate(&model.Room{
+		ID:        bannedID,
+		Title:     "封禁房间",
+		OwnerID:   userID,
+		Status:    model.RoomStatusBanned,
+		CreatedAt: now,
+		UpdatedAt: now,
+	})
+
+	post := func(roomID string) (*http.Response, map[string]interface{}) {
+		req, _ := http.NewRequest("POST", th.server.URL+"/api/room/"+roomID+"/danmaku", strings.NewReader(`{"content":"blocked"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(req)
+		assert.NoError(t, err)
+		defer resp.Body.Close()
+		var body map[string]interface{}
+		json.NewDecoder(resp.Body).Decode(&body)
+		return resp, body
+	}
+
+	for _, tt := range []struct {
+		name, roomID, code string
+		status             int
+	}{
+		{"not found", "missing-room", "room_not_found", http.StatusNotFound},
+		{"pending", pending.ID, "room_not_live", http.StatusConflict},
+		{"ended", ended, "room_not_live", http.StatusConflict},
+		{"banned", bannedID, "room_banned", http.StatusForbidden},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			resp, body := post(tt.roomID)
+			assert.Equal(t, tt.status, resp.StatusCode)
+			assert.Equal(t, tt.code, body["error"])
+		})
+	}
 }
 
 // ──────────── WebSocket 测试 ────────────
@@ -650,12 +704,15 @@ func TestFullBusinessFlow(t *testing.T) {
 		}
 	}
 
-	// 13. 新 WS 连接不能进入 ended 房间（不再创建新 WS，因为路由已注册）
-	//     直接通过 roomSvc 验证
-	_, err = th.roomSvc.GetRoom(roomID)
-	assert.NoError(t, err)
-	status, _ := th.roomSvc.GetStatus(roomID)
-	assert.Equal(t, model.RoomStatusEnded, status)
+	// 13. ended 房间的新 WS 握手必须返回 409。
+	wsURL := "ws" + strings.TrimPrefix(th.server.URL, "http") + "/ws?room_id=" + roomID + "&token=" + tokenB
+	newConn, response, dialErr := websocket.DefaultDialer.Dial(wsURL, nil)
+	assert.Error(t, dialErr)
+	assert.Nil(t, newConn)
+	if assert.NotNil(t, response) {
+		assert.Equal(t, http.StatusConflict, response.StatusCode)
+		response.Body.Close()
+	}
 
 	// 14. HTTP 历史查询仍能查到之前的弹幕
 	// 通过 DB 验证弹幕存在（通过 MemoryStore 查）
@@ -681,7 +738,7 @@ func TestConcurrentCreateAndShutdown(t *testing.T) {
 		s := store.New()
 		roomSt := store.NewMemoryRoomStore()
 		roomSvc := service.NewRoomService(roomSt)
-		svc := service.NewDanmakuService(s, hub, 128, 0, false, roomSvc)
+		svc := service.NewDanmakuService(s, hub, 128, 0, false, roomSvc, nil, nil, "test")
 
 		var wg sync.WaitGroup
 		producerCount := 8

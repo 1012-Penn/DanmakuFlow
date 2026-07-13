@@ -94,7 +94,7 @@
 
     <div class="hint">
         已有账号？ <a href="#" onclick="switchTab('login');return false">登录</a>
-        &nbsp;|&nbsp; <a href="http://localhost:8080/?room=test">直接进入（匿名）</a>
+        &nbsp;|&nbsp; <a href="/">返回直播间大厅</a>
     </div>
 </div>
 
@@ -138,7 +138,7 @@
             localStorage.setItem('token', data.token);
             localStorage.setItem('username', data.user.username);
             localStorage.setItem('nickname', data.user.nickname);
-            window.location.href = '/?room=test';
+            window.location.href = safeNext();
         } catch (err) {
             showError('loginError', err.message);
         } finally {
@@ -162,7 +162,7 @@
             localStorage.setItem('token', data.token);
             localStorage.setItem('username', data.user.username);
             localStorage.setItem('nickname', data.user.nickname);
-            window.location.href = '/?room=test';
+            window.location.href = safeNext();
         } catch (err) {
             showError('regError', err.message);
         } finally {
@@ -172,9 +172,15 @@
         return false;
     }
 
-    // 已登录则直接跳转
+    // 只接受同源相对路径，避免 next 参数变成开放重定向。
+    function safeNext() {
+        const next = new URLSearchParams(window.location.search).get('next');
+        return next && next.startsWith('/') && !next.startsWith('//') ? next : '/';
+    }
+
+    // 已登录则直接回到原页面或大厅。
     if (localStorage.getItem('token')) {
-        window.location.href = '/?room=test';
+        window.location.href = safeNext();
     }
 </script>
 </body>

@@ -130,7 +130,7 @@ func (s *AuthService) Login(username, password string) (*model.User, string, err
 // 返回 *model.Actor 以匹配 websocket.AuthValidator 接口。
 func (s *AuthService) ValidateToken(tokenString string) (*model.Actor, error) {
 	token, err := jwt.ParseWithClaims(tokenString, &AuthClaims{}, func(t *jwt.Token) (any, error) {
-		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+		if t.Method.Alg() != jwt.SigningMethodHS256.Alg() {
 			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
 		}
 		return s.jwtSecret, nil
@@ -149,12 +149,6 @@ func (s *AuthService) ValidateToken(tokenString string) (*model.Actor, error) {
 		Nickname:      claims.Nickname,
 		Authenticated: true,
 	}, nil
-}
-
-// ValidateTokenStrict 验证 JWT 且要求签名算法必须是 HS256。
-// 同 ValidateToken，但返回更严格的错误信息。
-func (s *AuthService) ValidateTokenStrict(tokenString string) (*model.Actor, error) {
-	return s.ValidateToken(tokenString)
 }
 
 // generateToken 为用户签发 JWT token（HS256），有效期 72 小时。

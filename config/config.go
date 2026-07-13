@@ -22,6 +22,7 @@ type Config struct {
 	Store     StoreConfig     `yaml:"store"`
 	Log       LogConfig       `yaml:"log"`
 	Redis     RedisConfig     `yaml:"redis"`
+	Kafka     KafkaConfig     `yaml:"kafka"`
 	RateLimit RateLimitConfig `yaml:"rate_limit"`
 	Pprof     PprofConfig     `yaml:"pprof"`
 	Auth      AuthConfig      `yaml:"auth"`
@@ -99,6 +100,15 @@ type RedisConfig struct {
 	InstanceID string `yaml:"instance_id"` // 实例标识（用于去重）。空 = 自动生成
 }
 
+// KafkaConfig 存放 Kafka 连接配置。
+// Brokers 为空时表示不使用 Kafka，退化为现有 danmakuChan + 直写 MySQL 模式。
+type KafkaConfig struct {
+	Brokers       []string `yaml:"brokers"`        // Kafka 代理地址列表，如 ["localhost:9092"]。空 = 不使用 Kafka
+	Topic         string   `yaml:"topic"`          // 弹幕事件 topic 名，默认 "danmaku_events"
+	ConsumerGroup string   `yaml:"consumer_group"` // consumer group ID，默认 "danmakuflow-danmaku-persist"
+	ClientID      string   `yaml:"client_id"`      // 客户端标识，空 = 自动生成实例 ID
+}
+
 // Load 从指定路径加载 YAML 配置文件，再应用环境变量覆盖。
 // 如果文件不存在，返回默认配置（不会报错）。
 // 如果文件存在但解析失败，返回错误。
@@ -132,7 +142,7 @@ func Load(path string) (*Config, error) {
 //	LOG_LEVEL                 — 日志级别（debug/info/warn/error）
 //	LOG_FORMAT                — 日志格式（text/json）
 //	PPROF_ENABLED             — 是否开启 pprof（true/false，默认 false）
-//	JWT_SECRET                — JWT 签名密钥（空=使用内置默认密钥）
+//	KAFKA_BROKERS             — Kafka 代理地址（逗号分隔），空=不使用 Kafka
 func applyEnvOverrides(cfg *Config) *Config {
 	if v := os.Getenv("SERVER_PORT"); v != "" {
 		if port, err := strconv.Atoi(v); err == nil {
@@ -161,6 +171,9 @@ func applyEnvOverrides(cfg *Config) *Config {
 	}
 	if v := os.Getenv("JWT_SECRET"); v != "" {
 		cfg.Auth.JWTSecret = v
+	}
+	if v := os.Getenv("KAFKA_BROKERS"); v != "" {
+		cfg.Kafka.Brokers = strings.Split(v, ",")
 	}
 	return cfg
 }
@@ -194,6 +207,11 @@ func Default() *Config {
 		Redis: RedisConfig{
 			Addr:       "", // 空 = 不使用 Redis
 			InstanceID: "",
+		},
+		Kafka: KafkaConfig{
+			Brokers:       nil, // 空 = 不使用 Kafka
+			Topic:         "danmaku_events",
+			ConsumerGroup: "danmakuflow-danmaku-persist",
 		},
 		RateLimit: RateLimitConfig{
 			MessagesPerSec: 0, // 0 = 不限制

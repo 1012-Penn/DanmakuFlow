@@ -1,7 +1,9 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -9,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 
+	"github.com/1012-Penn/DanmakuFlow/model"
 	"github.com/1012-Penn/DanmakuFlow/service"
 	"github.com/1012-Penn/DanmakuFlow/store"
 	"github.com/1012-Penn/DanmakuFlow/websocket"
@@ -18,10 +21,12 @@ import (
 type readyzCase struct {
 	name          string
 	setupHub      func() *websocket.Hub
+	setupSvc      func(s store.Store, hub *websocket.Hub) *service.DanmakuService
 	expectStatus  int
 	expectOverall string
 	expectMySQL   string
 	expectRedis   string
+	expectKafka   string
 }
 
 func TestReadyzCombinations(t *testing.T) {
@@ -31,23 +36,28 @@ func TestReadyzCombinations(t *testing.T) {
 			setupHub: func() *websocket.Hub {
 				return websocket.NewHubWithConfig(websocket.Config{}, nil)
 			},
-			expectStatus:  http.StatusOK,
-			expectOverall: "ok",
-			expectMySQL:   "disabled",
-			expectRedis:   "disabled",
-		},
-		{
-			name: "无 MySQL + Redis 已连接 → 200/ok, redis=up",
-			setupHub: func() *websocket.Hub {
-				// Hub with no Redis client (can't create real connection in unit test)
-				// Simulate: caller configured Redis but didn't connect = same as "no redis"
-				// This test covers the "redis=disabled" path instead
-				return websocket.NewHubWithConfig(websocket.Config{}, nil)
+			setupSvc: func(s store.Store, hub *websocket.Hub) *service.DanmakuService {
+				return service.NewDanmakuService(s, hub, 0, 0, false, nil, nil, nil, "test")
 			},
 			expectStatus:  http.StatusOK,
 			expectOverall: "ok",
 			expectMySQL:   "disabled",
 			expectRedis:   "disabled",
+			expectKafka:   "disabled",
+		},
+		{
+			name: "无 MySQL + 无 Redis + Kafka 已配置但 down → 200/degraded, kafka=down",
+			setupHub: func() *websocket.Hub {
+				return websocket.NewHubWithConfig(websocket.Config{}, nil)
+			},
+			setupSvc: func(s store.Store, hub *websocket.Hub) *service.DanmakuService {
+				return service.NewDanmakuService(s, hub, 0, 0, false, nil, &failPingProducer{}, nil, "test")
+			},
+			expectStatus:  http.StatusOK,
+			expectOverall: "degraded",
+			expectMySQL:   "disabled",
+			expectRedis:   "disabled",
+			expectKafka:   "down",
 		},
 		{
 			name: "无 MySQL + Redis 已配置但 down → 200/degraded",
@@ -56,10 +66,14 @@ func TestReadyzCombinations(t *testing.T) {
 				hub.MarkRedisConfigured()
 				return hub
 			},
+			setupSvc: func(s store.Store, hub *websocket.Hub) *service.DanmakuService {
+				return service.NewDanmakuService(s, hub, 0, 0, false, nil, nil, nil, "test")
+			},
 			expectStatus:  http.StatusOK,
 			expectOverall: "degraded",
 			expectMySQL:   "disabled",
 			expectRedis:   "down",
+			expectKafka:   "disabled",
 		},
 	}
 
@@ -69,7 +83,7 @@ func TestReadyzCombinations(t *testing.T) {
 
 			hub := tc.setupHub()
 			s := store.New()
-			svc := service.NewDanmakuService(s, hub, 0, 0, false, nil)
+			svc := tc.setupSvc(s, hub)
 			h := New(svc, hub, 20, "test-instance")
 
 			r := gin.New()
@@ -91,7 +105,16 @@ func TestReadyzCombinations(t *testing.T) {
 			if assert.True(t, ok, "响应应包含 dependencies 字段") {
 				assert.Equal(t, tc.expectMySQL, deps["mysql"])
 				assert.Equal(t, tc.expectRedis, deps["redis"])
+				assert.Equal(t, tc.expectKafka, deps["kafka"])
 			}
 		})
 	}
 }
+
+// failPingProducer 实现 KafkaProducerInterface，Ping 返回 false。
+type failPingProducer struct{}
+
+func (f *failPingProducer) Produce(ctx context.Context, dm model.Danmaku) error {
+	return errors.New("kafka down")
+}
+func (f *failPingProducer) Close() error { return nil }

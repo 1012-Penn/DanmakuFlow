@@ -49,14 +49,26 @@ func (h *DanmakuHandler) Create(c *gin.Context) {
 
 	dm, err := h.svc.CreateDanmaku(req)
 	if err != nil {
-		if errors.Is(err, service.ErrPersistenceQueueFull) || errors.Is(err, service.ErrPersistenceFailed) {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
-			return
-		}
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		status, code := danmakuErrorResponse(err)
+		c.JSON(status, gin.H{"error": code, "message": err.Error()})
 		return
 	}
 	c.JSON(http.StatusCreated, dm)
+}
+
+func danmakuErrorResponse(err error) (int, string) {
+	switch {
+	case errors.Is(err, service.ErrRoomNotFound):
+		return http.StatusNotFound, "room_not_found"
+	case errors.Is(err, service.ErrRoomBanned):
+		return http.StatusForbidden, "room_banned"
+	case errors.Is(err, service.ErrRoomNotLive):
+		return http.StatusConflict, "room_not_live"
+	case errors.Is(err, service.ErrPersistenceQueueFull), errors.Is(err, service.ErrPersistenceFailed):
+		return http.StatusServiceUnavailable, "persistence_unavailable"
+	default:
+		return http.StatusBadRequest, "validation_error"
+	}
 }
 
 func (h *DanmakuHandler) List(c *gin.Context) {
@@ -140,6 +152,34 @@ func (h *DanmakuHandler) Readyz(c *gin.Context) {
 		}
 	} else {
 		deps["redis"] = "disabled"
+	}
+
+	// Kafka：可降级依赖（类似 Redis）
+	if h.svc.HasKafkaConfig() {
+		ch := make(chan string, 1)
+		go func() {
+			if h.svc.PingKafka() {
+				ch <- "up"
+			} else {
+				ch <- "down"
+			}
+		}()
+		select {
+		case status := <-ch:
+			deps["kafka"] = status
+			if status == "down" {
+				if overall == "ok" {
+					overall = "degraded"
+				}
+			}
+		case <-time.After(2 * time.Second):
+			deps["kafka"] = "timeout"
+			if overall == "ok" {
+				overall = "degraded"
+			}
+		}
+	} else {
+		deps["kafka"] = "disabled"
 	}
 
 	c.JSON(httpStatus, gin.H{

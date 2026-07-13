@@ -175,6 +175,38 @@ var (
 	}, []string{"method", "route"})
 )
 
+// Kafka 指标。
+var (
+	KafkaProduceTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Subsystem: "kafka",
+		Name:      "produce_total",
+		Help:      "Kafka 生产消息总数，按 result 分类（success/error）。",
+	}, []string{"result"})
+
+	KafkaProduceLatency = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace: namespace,
+		Subsystem: "kafka",
+		Name:      "produce_latency_seconds",
+		Help:      "Kafka 生产消息延迟（秒）。",
+		Buckets:   prometheus.DefBuckets,
+	})
+
+	KafkaConsumerMsgTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace,
+		Subsystem: "kafka",
+		Name:      "consumer_messages_total",
+		Help:      "Kafka 消费消息总数。",
+	})
+
+	KafkaConsumerErrTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Subsystem: "kafka",
+		Name:      "consumer_errors_total",
+		Help:      "Kafka 消费错误总数，按 error_type 分类（mysql_dup/mysql_other/deserialize）。",
+	}, []string{"error_type"})
+)
+
 // Register 将所有指标注册到 reg。
 // 应当在 main 中启动时调用一次。重复注册会 panic。
 // 注意：prometheus.DefaultRegisterer 已包含 Go/Process 收集器，不再重复注册。
@@ -208,5 +240,11 @@ func Register(reg prometheus.Registerer) {
 		// HTTP
 		HTTPReqTotal,
 		HTTPReqDuration,
+
+		// Kafka
+		KafkaProduceTotal,
+		KafkaProduceLatency,
+		KafkaConsumerMsgTotal,
+		KafkaConsumerErrTotal,
 	)
 }

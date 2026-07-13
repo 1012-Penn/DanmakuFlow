@@ -144,8 +144,41 @@ func main() {
 	)
 	authHandler := handler.NewAuthHandler(authSvc)
 
+	// 创建 Kafka producer / consumer（如果有配置）
+	hasKafka := len(cfg.Kafka.Brokers) > 0
+	var kafkaProducer service.KafkaProducerInterface
+	var kafkaConsumer *service.KafkaConsumer
+	if hasKafka {
+		kafkaClientID := cfg.Kafka.ClientID
+		if kafkaClientID == "" {
+			kafkaClientID = instanceID
+		}
+		kp, err := service.NewKafkaProducer(cfg.Kafka.Brokers, cfg.Kafka.Topic, kafkaClientID)
+		if err != nil {
+			slog.Warn("Kafka 连接失败，降级为 danmakuChan + 直写 MySQL",
+				"brokers", cfg.Kafka.Brokers,
+				"error", err,
+			)
+		} else {
+			kafkaProducer = kp
+			slog.Info("已连接 Kafka producer", "topic", cfg.Kafka.Topic)
+			if hasDSN {
+				kc, err := service.NewKafkaConsumer(cfg.Kafka.Brokers, cfg.Kafka.Topic, cfg.Kafka.ConsumerGroup, kafkaClientID, s)
+				if err != nil {
+					slog.Warn("Kafka consumer 创建失败，将使用传统直写 MySQL",
+						"error", err,
+					)
+				} else {
+					kafkaConsumer = kc
+					go kafkaConsumer.Start(context.Background())
+					slog.Info("Kafka consumer 已启动", "group", cfg.Kafka.ConsumerGroup)
+				}
+			}
+		}
+	}
+
 	// 组装弹幕服务（注入 RoomStatusGetter 用于房间状态检查）
-	svc := service.NewDanmakuService(s, hub, cfg.Store.AsyncBufferSize, cfg.RateLimit.MessagesPerSec, hasDSN, roomSvc)
+	svc := service.NewDanmakuService(s, hub, cfg.Store.AsyncBufferSize, cfg.RateLimit.MessagesPerSec, hasDSN, roomSvc, kafkaProducer, cfg.Kafka.Brokers, instanceID)
 	h := handler.New(svc, hub, cfg.Store.DefaultListLimit, instanceID)
 
 	// 将认证服务和房间状态查询器注入 Hub
@@ -190,6 +223,7 @@ func main() {
 
 	// 前端页面
 	r.StaticFile("/", "./templates/index.html")
+	r.StaticFile("/room", "./templates/room.html")
 	r.StaticFile("/burst", "./templates/burst.html")
 
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
@@ -233,7 +267,15 @@ func main() {
 	}
 	drainCancel()
 
-	// 3. 关闭 WebSocket Hub：停止 Redis 后台，向所有房间发停止信号，等待房间退出
+	// 3. 关闭 Kafka consumer（提交最终 offset，防止 MySQL 关闭后仍在消费）
+	if kafkaConsumer != nil {
+		if err := kafkaConsumer.Close(); err != nil {
+			slog.Warn("Kafka consumer 关闭失败", "error", err)
+		}
+		slog.Info("Kafka consumer 已关闭")
+	}
+
+	// 5. 关闭 WebSocket Hub：停止 Redis 后台，向所有房间发停止信号，等待房间退出
 	hub.Shutdown()
 
 	// 4. 关闭 Redis 连接（此时已停止订阅，不会再有跨实例广播）
@@ -242,7 +284,7 @@ func main() {
 		slog.Info("Redis 连接已关闭")
 	}
 
-	// 5. 关闭 MySQL 数据库连接（此时确保无更多写入）
+	// 7. 关闭 MySQL 数据库连接（此时确保无更多写入）
 	if ms, ok := s.(*store.MySQLStore); ok {
 		ms.Close()
 		slog.Info("MySQL 连接已关闭")

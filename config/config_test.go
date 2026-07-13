@@ -69,6 +69,36 @@ func TestEmptyEnvNoOverride(t *testing.T) {
 	}
 }
 
+func TestKafkaEnvOverrides(t *testing.T) {
+	os.Setenv("KAFKA_BROKERS", "broker1:9092,broker2:9092")
+	defer os.Unsetenv("KAFKA_BROKERS")
+
+	cfg := applyEnvOverrides(Default())
+
+	if len(cfg.Kafka.Brokers) != 2 {
+		t.Fatalf("KAFKA_BROKERS override failed: expected 2 brokers, got %d", len(cfg.Kafka.Brokers))
+	}
+	if cfg.Kafka.Brokers[0] != "broker1:9092" {
+		t.Errorf("broker[0] = %q, expected %q", cfg.Kafka.Brokers[0], "broker1:9092")
+	}
+	if cfg.Kafka.Brokers[1] != "broker2:9092" {
+		t.Errorf("broker[1] = %q, expected %q", cfg.Kafka.Brokers[1], "broker2:9092")
+	}
+}
+
+func TestKafkaDefaults(t *testing.T) {
+	cfg := Default()
+	if cfg.Kafka.Brokers != nil {
+		t.Errorf("default brokers should be nil, got %v", cfg.Kafka.Brokers)
+	}
+	if cfg.Kafka.Topic != "danmaku_events" {
+		t.Errorf("default topic = %q, expected %q", cfg.Kafka.Topic, "danmaku_events")
+	}
+	if cfg.Kafka.ConsumerGroup != "danmakuflow-danmaku-persist" {
+		t.Errorf("default consumer_group = %q", cfg.Kafka.ConsumerGroup)
+	}
+}
+
 func TestInvalidPortFallsBack(t *testing.T) {
 	os.Setenv("SERVER_PORT", "not-a-number")
 	defer os.Unsetenv("SERVER_PORT")
