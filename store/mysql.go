@@ -82,7 +82,7 @@ func (s *MySQLStore) List(limit int) []model.Danmaku {
 // 游标条件：(created_at > sinceTime) OR (created_at = sinceTime AND id > lastID)。
 func (s *MySQLStore) ListSince(roomID string, sinceTime time.Time, lastID string, limit int) ([]model.Danmaku, error) {
 	var list []model.Danmaku
-	err := s.db.Where("room_id = ?", roomID).
+	err := s.db.Where("room_id = ? AND status = ?", roomID, model.DanmakuStatusApproved).
 		Where("(created_at > ?) OR (created_at = ? AND id > ?)", sinceTime, sinceTime, lastID).
 		Order("created_at ASC, id ASC").
 		Limit(limit).
@@ -96,11 +96,11 @@ func (s *MySQLStore) ListSince(roomID string, sinceTime time.Time, lastID string
 	return list, nil
 }
 
-// ListByRoom 返回指定房间最近 limit 条弹幕。
+// ListByRoom 返回指定房间最近 limit 条已审核通过的弹幕。
+// 条件：room_id + status=approved，利用联合索引 idx_room_status_time。
 func (s *MySQLStore) ListByRoom(roomID string, limit int) []model.Danmaku {
 	var list []model.Danmaku
-	// 利用联合索引 idx_room_time，一次索引下推就完成过滤+排序
-	s.db.Where("room_id = ?", roomID).
+	s.db.Where("room_id = ? AND status = ?", roomID, model.DanmakuStatusApproved).
 		Order("created_at DESC").
 		Limit(limit).
 		Find(&list)
@@ -140,14 +140,28 @@ func (s *MySQLStore) DB() *gorm.DB {
 	return s.db
 }
 
-// UpdateStatus 更新弹幕审核状态。
-func (s *MySQLStore) UpdateStatus(id, status, reviewedBy, reason string, reviewedAt time.Time) error {
-	return s.db.Model(&model.Danmaku{}).Where("id = ?", id).Updates(map[string]any{
+// FindByID 通过 ID 查找弹幕。NotFound 时返回 (nil, nil)。
+func (s *MySQLStore) FindByID(id string) (*model.Danmaku, error) {
+	var dm model.Danmaku
+	err := s.db.Where("id = ?", id).First(&dm).Error
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("find danmaku by id: %w", err)
+	}
+	return &dm, nil
+}
+
+// UpdateStatus 更新弹幕审核状态。返回影响的行数。
+func (s *MySQLStore) UpdateStatus(id, status, reviewedBy, reason string, reviewedAt time.Time) (int64, error) {
+	result := s.db.Model(&model.Danmaku{}).Where("id = ?", id).Updates(map[string]any{
 		"status":        status,
 		"reviewed_by":   reviewedBy,
 		"reviewed_at":   reviewedAt,
 		"review_reason": reason,
-	}).Error
+	})
+	return result.RowsAffected, result.Error
 }
 
 // ListByStatus 根据状态查询弹幕。

@@ -12,9 +12,9 @@ const (
 // Report 表示一条用户举报记录。
 type Report struct {
 	ID             string     `json:"id" gorm:"primaryKey;size:36"`
-	DanmakuID      string     `json:"danmaku_id" gorm:"size:36;not null;index"`
+	DanmakuID      string     `json:"danmaku_id" gorm:"size:36;not null;uniqueIndex:idx_report_dm_reporter"`
 	RoomID         string     `json:"room_id" gorm:"size:50;not null;index"`
-	ReporterUserID string     `json:"reporter_user_id" gorm:"size:36;not null"`
+	ReporterUserID string     `json:"reporter_user_id" gorm:"size:36;not null;uniqueIndex:idx_report_dm_reporter"`
 	Reason         string     `json:"reason" gorm:"type:text;not null"`
 	Status         string     `json:"status" gorm:"size:10;not null;default:'pending';index"`
 	CreatedAt      time.Time  `json:"created_at" gorm:"autoCreateTime"`

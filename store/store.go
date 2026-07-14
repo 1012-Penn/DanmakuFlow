@@ -27,15 +27,15 @@ type MemoryStore struct {
 	danmakus []model.Danmaku
 }
 
-// ListByRoom 返回指定房间最近 limit 条弹幕。
-// 从后往前遍历，找到 roomID 匹配的弹幕，凑够 limit 条即停。
+// ListByRoom 返回指定房间最近 limit 条已审核通过的弹幕。
+// 从后往前遍历，找到 roomID 匹配且 approved 的弹幕，凑够 limit 条即停。
 func (s *MemoryStore) ListByRoom(roomID string, limit int) []model.Danmaku {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	result := make([]model.Danmaku, 0, limit)
 	for i := len(s.danmakus) - 1; i >= 0 && len(result) < limit; i-- {
-		if s.danmakus[i].RoomID == roomID {
+		if s.danmakus[i].RoomID == roomID && s.danmakus[i].Status == model.DanmakuStatusApproved {
 			result = append(result, s.danmakus[i])
 		}
 	}
@@ -55,7 +55,7 @@ func New() *MemoryStore {
 	}
 }
 
-// ListSince 返回指定房间在 sinceTime+lastID 之后的弹幕。
+// ListSince 返回指定房间在 sinceTime+lastID 之后的已审核通过弹幕。
 func (s *MemoryStore) ListSince(roomID string, sinceTime time.Time, lastID string, limit int) ([]model.Danmaku, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -63,6 +63,9 @@ func (s *MemoryStore) ListSince(roomID string, sinceTime time.Time, lastID strin
 	var result []model.Danmaku
 	for _, d := range s.danmakus {
 		if d.RoomID != roomID {
+			continue
+		}
+		if d.Status != model.DanmakuStatusApproved {
 			continue
 		}
 		// 游标条件：(created_at > sinceTime) OR (created_at = sinceTime AND id > lastID)
@@ -89,9 +92,13 @@ func (s *MemoryStore) Ping() bool {
 
 // Add 添加一条弹幕。
 // 写锁确保同时只有一个 goroutine 能修改数据。
+// 空状态时统一补为 approved，保证兼容性和查询语义一致性。
 func (s *MemoryStore) Add(d model.Danmaku) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if d.Status == "" {
+		d.Status = model.DanmakuStatusApproved
+	}
 	s.danmakus = append(s.danmakus, d)
 	return nil
 }
@@ -118,8 +125,22 @@ func (s *MemoryStore) List(limit int) []model.Danmaku {
 // DanmakuModerationStore 实现（MemoryStore）
 // ---------------------------------------------------------------------------
 
-// UpdateStatus 更新弹幕审核状态。
-func (s *MemoryStore) UpdateStatus(id, status, reviewedBy, reason string, reviewedAt time.Time) error {
+// FindByID 通过 ID 查找弹幕。NotFound 时返回 (nil, nil)。
+func (s *MemoryStore) FindByID(id string) (*model.Danmaku, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for i := range s.danmakus {
+		if s.danmakus[i].ID == id {
+			cp := s.danmakus[i]
+			return &cp, nil
+		}
+	}
+	return nil, nil
+}
+
+// UpdateStatus 更新弹幕审核状态。返回影响的行数。
+func (s *MemoryStore) UpdateStatus(id, status, reviewedBy, reason string, reviewedAt time.Time) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -129,10 +150,10 @@ func (s *MemoryStore) UpdateStatus(id, status, reviewedBy, reason string, review
 			s.danmakus[i].ReviewedBy = reviewedBy
 			s.danmakus[i].ReviewedAt = &reviewedAt
 			s.danmakus[i].ReviewReason = reason
-			return nil
+			return 1, nil
 		}
 	}
-	return nil
+	return 0, nil
 }
 
 // ListByStatus 根据状态查询弹幕。roomID 为空时查所有房间。

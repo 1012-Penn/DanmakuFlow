@@ -11,8 +11,10 @@ import (
 // DanmakuModerationStore 提供弹幕审核状态的管理能力。
 // 与 Store（弹幕读写）接口平行，是独立的审核存储领域。
 type DanmakuModerationStore interface {
-	// UpdateStatus 更新弹幕审核状态。
-	UpdateStatus(id, status, reviewedBy, reason string, reviewedAt time.Time) error
+	// FindByID 通过 ID 查找弹幕。NotFound 时返回 (nil, nil)。
+	FindByID(id string) (*model.Danmaku, error)
+	// UpdateStatus 更新弹幕审核状态。返回影响的行数。
+	UpdateStatus(id, status, reviewedBy, reason string, reviewedAt time.Time) (int64, error)
 	// ListByStatus 根据状态查询弹幕。roomID 为空时查所有房间。
 	ListByStatus(roomID, status string, limit int) ([]model.Danmaku, error)
 }
@@ -23,6 +25,8 @@ type ReportStore interface {
 	Create(report *model.Report) error
 	// FindByID 通过 ID 查找举报。
 	FindByID(id string) (*model.Report, error)
+	// FindByDanmakuAndReporter 查找某用户对某弹幕的举报（用于重复检测）。
+	FindByDanmakuAndReporter(danmakuID, reporterID string) (*model.Report, error)
 	// ListByStatus 按状态查询举报。
 	ListByStatus(status string, limit int) ([]model.Report, error)
 	// UpdateStatus 更新举报状态。
@@ -85,6 +89,19 @@ func (s *MemoryReportStore) FindByID(id string) (*model.Report, error) {
 	}
 	cp := *r
 	return &cp, nil
+}
+
+func (s *MemoryReportStore) FindByDanmakuAndReporter(danmakuID, reporterID string) (*model.Report, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for _, r := range s.reports {
+		if r.DanmakuID == danmakuID && r.ReporterUserID == reporterID {
+			cp := *r
+			return &cp, nil
+		}
+	}
+	return nil, nil
 }
 
 func (s *MemoryReportStore) ListByStatus(status string, limit int) ([]model.Report, error) {

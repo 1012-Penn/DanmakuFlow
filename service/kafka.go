@@ -21,7 +21,9 @@ import (
 // ─── Event Schema ──────────────────────────────────────────────
 
 // SchemaVersion 是当前事件 schema 版本。
-const SchemaVersion = 1
+// v1: 基础弹幕事件
+// v2: 增加 Status/ReviewedBy/ReviewedAt/ReviewReason 审核字段
+const SchemaVersion = 2
 
 // DanmakuEvent 是写入 Kafka topic 的弹幕事件。
 // 所有字段使用 json tag（snake_case），与现有 JSON 风格一致。
@@ -37,6 +39,12 @@ type DanmakuEvent struct {
 	Timestamp     time.Time `json:"timestamp"`      // 弹幕发送时间（UTC）
 	InstanceID    string    `json:"instance_id"`    // 来源实例 ID
 	SchemaVersion int       `json:"schema_version"` // schema 版本号
+
+	// v2 新增审核字段：确保 Kafka 完整传递审核状态
+	Status       string     `json:"status,omitempty"`        // 弹幕审核状态
+	ReviewedBy   string     `json:"reviewed_by,omitempty"`   // 审核人
+	ReviewedAt   *time.Time `json:"reviewed_at,omitempty"`   // 审核时间
+	ReviewReason string     `json:"review_reason,omitempty"` // 审核理由
 }
 
 // eventFromDanmaku 将 model.Danmaku 转为 Kafka 事件。
@@ -53,6 +61,10 @@ func eventFromDanmaku(dm model.Danmaku, instanceID string) DanmakuEvent {
 		Timestamp:     dm.Timestamp,
 		InstanceID:    instanceID,
 		SchemaVersion: SchemaVersion,
+		Status:        dm.Status,
+		ReviewedBy:    dm.ReviewedBy,
+		ReviewedAt:    dm.ReviewedAt,
+		ReviewReason:  dm.ReviewReason,
 	}
 }
 
@@ -229,16 +241,25 @@ func (h *consumerGroupHandler) processMessage(session sarama.ConsumerGroupSessio
 		return nil
 	}
 
-	// 构建弹幕对象
+	// 构建弹幕对象，保留完整审核状态
+	// 兼容 v1 旧事件：缺少 status 时默认 approved
+	status := event.Status
+	if status == "" {
+		status = model.DanmakuStatusApproved
+	}
 	dm := model.Danmaku{
-		ID:        event.DanmakuID,
-		Content:   event.Content,
-		Color:     event.Color,
-		Type:      event.Type,
-		FontSize:  event.FontSize,
-		RoomID:    event.RoomID,
-		Timestamp: event.Timestamp,
-		UserID:    event.UserID,
+		ID:           event.DanmakuID,
+		Content:      event.Content,
+		Color:        event.Color,
+		Type:         event.Type,
+		FontSize:     event.FontSize,
+		RoomID:       event.RoomID,
+		Timestamp:    event.Timestamp,
+		UserID:       event.UserID,
+		Status:       status,
+		ReviewedBy:   event.ReviewedBy,
+		ReviewedAt:   event.ReviewedAt,
+		ReviewReason: event.ReviewReason,
 	}
 
 	// 写入 store（幂等：duplicate key 视为成功）

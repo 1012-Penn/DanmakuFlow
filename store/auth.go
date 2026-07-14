@@ -28,6 +28,8 @@ type UserStore interface {
 	UnbanUser(id string) error
 	// ListBannedUsers 列出所有被封禁的用户。
 	ListBannedUsers() ([]model.User, error)
+	// HasAdminOtherThan 检查系统中是否存在除 excludeID 以外的 admin。
+	HasAdminOtherThan(excludeID string) (bool, error)
 }
 
 // MemoryUserStore 使用内存 map 存储用户。
@@ -141,4 +143,43 @@ func (s *MemoryUserStore) ListBannedUsers() ([]model.User, error) {
 		}
 	}
 	return result, nil
+}
+
+// List 列出所有用户。
+func (s *MemoryUserStore) List() ([]model.User, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	result := make([]model.User, 0, len(s.byID))
+	for _, user := range s.byID {
+		result = append(result, *user)
+	}
+	return result, nil
+}
+
+// HasAdminOtherThan 检查系统中是否存在除 excludeID 以外的 admin。
+func (s *MemoryUserStore) HasAdminOtherThan(excludeID string) (bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for _, user := range s.byID {
+		if user.ID != excludeID && user.Role == model.RoleAdmin {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// Delete 从存储中删除用户（仅用于测试）。
+func (s *MemoryUserStore) Delete(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	user, ok := s.byID[id]
+	if !ok {
+		return nil
+	}
+	delete(s.byID, id)
+	delete(s.users, user.Username)
+	return nil
 }

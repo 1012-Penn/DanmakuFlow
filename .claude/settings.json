@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go run .)",
+      "Bash(go test *)",
+      "Bash(go build *)",
+      "Bash(go fmt *)",
+      "Bash(go vet *)",
+      "Bash(go mod *)",
+      "Bash(curl *)",
+      "Bash(kill *)",
+      "Bash(wait *)",
+      "Bash(lsof *)",
+      "Bash(python3 *)",
+      "Bash(echo *)",
+      "Bash(mysql *)",
+      "Bash(redis-cli *)",
+      "Bash(git *)",
+      "Bash(npm *)"
+    ]
+  },
+  "hooks": {}
+}

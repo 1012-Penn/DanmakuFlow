@@ -30,10 +30,10 @@ type Danmaku struct {
 	Color        string     `json:"color"     gorm:"size:7;default:'#ffffff'"`
 	Type         string     `json:"type"      gorm:"column:danmaku_type;size:10;not null;default:'scroll'"`
 	FontSize     int        `json:"font_size" gorm:"default:25"`
-	RoomID       string     `json:"room_id"   gorm:"size:50;not null;index:idx_room_time"`
-	Timestamp    time.Time  `json:"timestamp" gorm:"column:created_at;not null;index:idx_room_time"`
+	RoomID       string     `json:"room_id"   gorm:"size:50;not null;index:idx_room_status_time"`
+	Timestamp    time.Time  `json:"timestamp" gorm:"column:created_at;not null;index:idx_room_status_time"`
 	UserID       string     `json:"user_id"   gorm:"size:50;not null"`
-	Status       string     `json:"status"    gorm:"size:10;default:'approved';index"`
+	Status       string     `json:"status"    gorm:"size:10;default:'approved';index:idx_room_status_time;index"`
 	ReviewedBy   string     `json:"reviewed_by,omitempty" gorm:"size:36"`
 	ReviewedAt   *time.Time `json:"reviewed_at,omitempty"`
 	ReviewReason string     `json:"review_reason,omitempty" gorm:"size:255"`

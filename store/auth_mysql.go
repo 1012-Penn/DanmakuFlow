@@ -98,6 +98,18 @@ func (s *MySQLUserStore) ListBannedUsers() ([]model.User, error) {
 	return users, nil
 }
 
+// HasAdminOtherThan 检查系统中是否存在除 excludeID 以外的 admin。
+func (s *MySQLUserStore) HasAdminOtherThan(excludeID string) (bool, error) {
+	var count int64
+	err := s.db.Model(&model.User{}).
+		Where("id != ? AND role = ?", excludeID, model.RoleAdmin).
+		Count(&count).Error
+	if err != nil {
+		return false, fmt.Errorf("count other admins: %w", err)
+	}
+	return count > 0, nil
+}
+
 // isDuplicateEntry 判断 MySQL 错误是否为唯一键冲突。
 func isDuplicateEntry(err error) bool {
 	if err == nil {

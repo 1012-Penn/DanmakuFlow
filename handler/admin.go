@@ -27,24 +27,37 @@ func NewAdminHandler(moderationService *service.ModerationService, adminService 
 }
 
 // RegisterAdminRoutes 注册审核管理路由。
-// 需要先经过 AuthMiddleware（认证）和 RequireRole（鉴权）。
-func (h *AdminHandler) RegisterAdminRoutes(r *gin.Engine, authMW gin.HandlerFunc, roleMW gin.HandlerFunc) {
-	admin := r.Group("/api/admin")
-	admin.Use(authMW)
-	admin.Use(roleMW)
+//
+// 权限模型：
+//   - moderator 可以：查看/审核弹幕、查看/处理举报、禁言/解禁、查看审计日志
+//   - admin 拥有 moderator 的全部权限 + 封禁/解封用户、修改用户角色
+//
+// 路由分两组：
+//   - /api/admin/moderation/* (moderator + admin)
+//   - /api/admin/users/*      (admin only)
+func (h *AdminHandler) RegisterAdminRoutes(r *gin.Engine, authMW gin.HandlerFunc, modRoleMW gin.HandlerFunc, adminRoleMW gin.HandlerFunc) {
+	// moderator + admin 可访问的治理路由
+	modGroup := r.Group("/api/admin")
+	modGroup.Use(authMW)
+	modGroup.Use(modRoleMW)
 	{
-		admin.GET("/reports", h.ListReports)
-		admin.POST("/reports/:id/resolve", h.ResolveReport)
-		admin.POST("/danmaku/:id/review", h.ReviewDanmaku)
-		admin.POST("/users/:id/ban", h.BanUser)
-		admin.POST("/users/:id/unban", h.UnbanUser)
-		admin.GET("/audit-log", h.GetAuditLog)
-		admin.GET("/flagged-danmaku", h.GetFlaggedDanmaku)
-		admin.POST("/rooms/:room_id/mute", h.MuteUser)
-		admin.POST("/rooms/:room_id/unmute", h.UnmuteUser)
+		modGroup.GET("/reports", h.ListReports)
+		modGroup.POST("/reports/:id/resolve", h.ResolveReport)
+		modGroup.POST("/danmaku/:id/review", h.ReviewDanmaku)
+		modGroup.GET("/audit-log", h.GetAuditLog)
+		modGroup.GET("/flagged-danmaku", h.GetFlaggedDanmaku)
+		modGroup.POST("/rooms/:room_id/mute", h.MuteUser)
+		modGroup.POST("/rooms/:room_id/unmute", h.UnmuteUser)
+	}
 
-		// 仅 admin 可变更用户角色（子路由额外限制）
-		admin.POST("/users/:id/role", h.SetUserRole)
+	// admin only 的权限管理路由
+	adminGroup := r.Group("/api/admin")
+	adminGroup.Use(authMW)
+	adminGroup.Use(adminRoleMW)
+	{
+		adminGroup.POST("/users/:id/ban", h.BanUser)
+		adminGroup.POST("/users/:id/unban", h.UnbanUser)
+		adminGroup.POST("/users/:id/role", h.SetUserRole)
 	}
 }
 
@@ -67,8 +80,10 @@ func (h *AdminHandler) ListReports(c *gin.Context) {
 
 // ResolveReport 处理/驳回一条举报。
 type resolveReportRequest struct {
-	Status string `json:"status" binding:"required"` // resolved / dismissed
-	Reason string `json:"reason"`
+	Decision    string `json:"decision"`         // confirmed / dismissed
+	Action      string `json:"action,omitempty"` // reject / mute / ban
+	Reason      string `json:"reason"`
+	MuteMinutes int    `json:"mute_minutes,omitempty"` // 禁言时长（分钟），仅 action=mute 时有效
 }
 
 func (h *AdminHandler) ResolveReport(c *gin.Context) {
@@ -78,21 +93,32 @@ func (h *AdminHandler) ResolveReport(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if req.Status != model.ReportStatusResolved && req.Status != model.ReportStatusDismissed {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "status must be 'resolved' or 'dismissed'"})
+	if req.Decision != "confirmed" && req.Decision != "dismissed" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "decision must be 'confirmed' or 'dismissed'"})
 		return
 	}
 
 	actorID, _ := c.Get("user_id")
-	if err := h.moderationService.ResolveReport(reportID, actorID.(string), req.Status, req.Reason); err != nil {
-		if errors.Is(err, errors.New("report not found")) {
+	actorRole, _ := c.Get("user_role")
+
+	result, err := h.moderationService.ResolveReportWithAction(reportID, actorID.(string), actorRole.(string), req.Decision, req.Action, req.Reason, req.MuteMinutes)
+	if err != nil {
+		if errors.Is(err, model.ErrReportNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "report not found"})
+			return
+		}
+		if errors.Is(err, model.ErrReportClosed) {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, model.ErrInsufficientRole) {
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	c.JSON(http.StatusOK, result)
 }
 
 // ReviewDanmaku 审核弹幕（审批/驳回/标记）。
@@ -116,17 +142,23 @@ func (h *AdminHandler) ReviewDanmaku(c *gin.Context) {
 	}
 
 	actorID, _ := c.Get("user_id")
-	if err := h.moderationService.ReviewDanmaku(danmakuID, actorID.(string), req.Status, req.Reason); err != nil {
+	roomID := c.DefaultQuery("room_id", "")
+
+	result, err := h.moderationService.ReviewDanmaku(danmakuID, actorID.(string), req.Status, req.Reason, roomID)
+	if err != nil {
+		if errors.Is(err, model.ErrDanmakuNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "danmaku not found"})
+			return
+		}
+		if errors.Is(err, model.ErrForbiddenTransition) {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	// 记录指标
-	action := "manual_approve"
-	if req.Status == model.DanmakuStatusRejected {
-		action = "manual_reject"
-	}
-	c.JSON(http.StatusOK, gin.H{"status": "ok", "action": action})
+	c.JSON(http.StatusOK, result)
 }
 
 // BanUser 封禁用户。
@@ -143,8 +175,12 @@ func (h *AdminHandler) BanUser(c *gin.Context) {
 	}
 	actorID, _ := c.Get("user_id")
 	if err := h.adminService.BanUser(actorID.(string), targetID, req.Reason); err != nil {
-		if err.Error() == "target user not found" {
+		if errors.Is(err, model.ErrTargetUserNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, model.ErrCannotBanAdmin) || errors.Is(err, model.ErrCannotBanSelf) || errors.Is(err, model.ErrInsufficientRole) {
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
 			return
 		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -158,6 +194,10 @@ func (h *AdminHandler) UnbanUser(c *gin.Context) {
 	targetID := c.Param("id")
 	actorID, _ := c.Get("user_id")
 	if err := h.adminService.UnbanUser(actorID.(string), targetID); err != nil {
+		if errors.Is(err, model.ErrInsufficientRole) || errors.Is(err, model.ErrCannotBanSelf) {
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -178,11 +218,19 @@ func (h *AdminHandler) SetUserRole(c *gin.Context) {
 	}
 	actorID, _ := c.Get("user_id")
 	if err := h.adminService.SetUserRole(actorID.(string), targetID, req.Role); err != nil {
-		if err.Error() == "target user not found" {
+		if errors.Is(err, model.ErrTargetUserNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 			return
 		}
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		if errors.Is(err, model.ErrInsufficientRole) || errors.Is(err, model.ErrCannotChangeOwnRole) || errors.Is(err, model.ErrLastAdmin) {
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, model.ErrInvalidRole) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})

@@ -1,0 +1,59 @@
+# 弹幕系统 Verify Skill
+
+验证整个系统的端到端工作流：
+1. 启动服务（go run . &）
+2. 注册用户 → JWT
+3. 创建房间 → 开始直播
+4. HTTP 发送弹幕
+5. WebSocket 连接并接收广播
+6. 验证历史查询
+7. 关闭服务
+
+## 流程
+
+```go
+// 启动
+go run . &
+sleep 3
+
+// 注册用户
+curl -s -X POST http://localhost:8080/api/auth/register \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"verify","password":"verify123","nickname":"验证员"}' \
+  | python3 -m json.tool
+
+// 登录获取 token
+TOKEN=$(curl -s -X POST http://localhost:8080/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"verify","password":"verify123"}' \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+
+// 创建房间
+ROOM_ID=$(curl -s -X POST http://localhost:8080/api/rooms \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"title":"验证房间"}' \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+
+// 开始直播
+curl -s -X POST "http://localhost:8080/api/rooms/$ROOM_ID/start" \
+  -H "Authorization: Bearer $TOKEN"
+
+// 发弹幕
+curl -s -X POST "http://localhost:8080/api/room/$ROOM_ID/danmaku" \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"content":"验证消息"}'
+
+// 查历史
+curl -s "http://localhost:8080/api/room/$ROOM_ID/danmaku"
+
+// 停止
+kill %1 2>/dev/null; wait 2>/dev/null
+```
+
+## 健康检查点
+- `/healthz` → 200, `status: ok`
+- `/readyz` → 200, 依赖状态
+- `/metrics` → Prometheus 指标
+- WebSocket 连接 → 能收到广播

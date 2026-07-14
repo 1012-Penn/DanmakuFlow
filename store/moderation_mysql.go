@@ -2,6 +2,7 @@ package store
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/1012-Penn/DanmakuFlow/model"
@@ -22,7 +23,11 @@ func NewMySQLReportStore(db *gorm.DB) (*MySQLReportStore, error) {
 }
 
 func (s *MySQLReportStore) Create(report *model.Report) error {
-	return s.db.Create(report).Error
+	err := s.db.Create(report).Error
+	if err != nil && strings.Contains(err.Error(), "Duplicate entry") {
+		return model.ErrDuplicateReport
+	}
+	return err
 }
 
 func (s *MySQLReportStore) FindByID(id string) (*model.Report, error) {
@@ -33,6 +38,18 @@ func (s *MySQLReportStore) FindByID(id string) (*model.Report, error) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("find report by id: %w", err)
+	}
+	return &report, nil
+}
+
+func (s *MySQLReportStore) FindByDanmakuAndReporter(danmakuID, reporterID string) (*model.Report, error) {
+	var report model.Report
+	err := s.db.Where("danmaku_id = ? AND reporter_user_id = ?", danmakuID, reporterID).First(&report).Error
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("find report by danmaku and reporter: %w", err)
 	}
 	return &report, nil
 }

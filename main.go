@@ -185,9 +185,22 @@ func main() {
 	if hasDSN {
 		if mysqlStore, ok := s.(*store.MySQLStore); ok {
 			db := mysqlStore.DB()
-			reportStore, _ = store.NewMySQLReportStore(db)
-			auditLogStore, _ = store.NewMySQLAuditLogStore(db)
-			muteStore, _ = store.NewMySQLMuteStore(db)
+			var rsErr error
+			reportStore, rsErr = store.NewMySQLReportStore(db)
+			if rsErr != nil {
+				slog.Error("举报表初始化失败", "error", rsErr)
+				os.Exit(1)
+			}
+			auditLogStore, rsErr = store.NewMySQLAuditLogStore(db)
+			if rsErr != nil {
+				slog.Error("审计日志表初始化失败", "error", rsErr)
+				os.Exit(1)
+			}
+			muteStore, rsErr = store.NewMySQLMuteStore(db)
+			if rsErr != nil {
+				slog.Error("禁言表初始化失败", "error", rsErr)
+				os.Exit(1)
+			}
 		}
 	}
 	if reportStore == nil {
@@ -208,6 +221,7 @@ func main() {
 		danmakuModStore, reportStore, auditLogStore, muteStore, userStore,
 		cfg.Moderation.Blocklist, cfg.Moderation.BlocklistPath,
 		cfg.Moderation.AutoReject, cfg.Moderation.FailClosed,
+		hub,
 	)
 
 	// 组装弹幕服务（注入 RoomStatusGetter 用于房间状态检查，注入 moderation 用于审核）
@@ -241,7 +255,12 @@ func main() {
 		dmGroup.POST("/report", reportHandler.Report)
 	}
 	// 注册 admin 路由（认证 + 鉴权）
-	adminHandler.RegisterAdminRoutes(r, handler.AuthMiddleware(authSvc), handler.RequireRole(authSvc, "admin", "moderator"))
+	// moderator 可访问治理路由，admin-only 路由单独保护
+	adminHandler.RegisterAdminRoutes(r,
+		handler.AuthMiddleware(authSvc),
+		handler.RequireRole(authSvc, "admin", "moderator"),
+		handler.RequireRole(authSvc, "admin"),
+	)
 	// 条件注册 pprof 路由（默认关闭）
 	if cfg.Pprof.Enabled {
 		pprofGroup := r.Group("/debug/pprof")
