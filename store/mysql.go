@@ -140,6 +140,35 @@ func (s *MySQLStore) DB() *gorm.DB {
 	return s.db
 }
 
+// UpdateStatus 更新弹幕审核状态。
+func (s *MySQLStore) UpdateStatus(id, status, reviewedBy, reason string, reviewedAt time.Time) error {
+	return s.db.Model(&model.Danmaku{}).Where("id = ?", id).Updates(map[string]any{
+		"status":        status,
+		"reviewed_by":   reviewedBy,
+		"reviewed_at":   reviewedAt,
+		"review_reason": reason,
+	}).Error
+}
+
+// ListByStatus 根据状态查询弹幕。
+func (s *MySQLStore) ListByStatus(roomID, status string, limit int) ([]model.Danmaku, error) {
+	var list []model.Danmaku
+	query := s.db.Where("status = ?", status)
+	if roomID != "" {
+		query = query.Where("room_id = ?", roomID)
+	}
+	if limit > 0 {
+		query = query.Limit(limit)
+	}
+	if err := query.Order("created_at DESC").Find(&list).Error; err != nil {
+		return nil, err
+	}
+	if list == nil {
+		list = make([]model.Danmaku, 0)
+	}
+	return list, nil
+}
+
 // Close 关闭数据库连接。
 func (s *MySQLStore) Close() {
 	sqlDB, err := s.db.DB()

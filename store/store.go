@@ -113,3 +113,49 @@ func (s *MemoryStore) List(limit int) []model.Danmaku {
 	copy(result, s.danmakus[start:])
 	return result
 }
+
+// ---------------------------------------------------------------------------
+// DanmakuModerationStore 实现（MemoryStore）
+// ---------------------------------------------------------------------------
+
+// UpdateStatus 更新弹幕审核状态。
+func (s *MemoryStore) UpdateStatus(id, status, reviewedBy, reason string, reviewedAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for i := range s.danmakus {
+		if s.danmakus[i].ID == id {
+			s.danmakus[i].Status = status
+			s.danmakus[i].ReviewedBy = reviewedBy
+			s.danmakus[i].ReviewedAt = &reviewedAt
+			s.danmakus[i].ReviewReason = reason
+			return nil
+		}
+	}
+	return nil
+}
+
+// ListByStatus 根据状态查询弹幕。roomID 为空时查所有房间。
+func (s *MemoryStore) ListByStatus(roomID, status string, limit int) ([]model.Danmaku, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var result []model.Danmaku
+	for _, d := range s.danmakus {
+		if d.Status != status {
+			continue
+		}
+		if roomID != "" && d.RoomID != roomID {
+			continue
+		}
+		result = append(result, d)
+	}
+	// 按时间降序排列（最新的在前）
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Timestamp.After(result[j].Timestamp)
+	})
+	if limit > 0 && len(result) > limit {
+		result = result[:limit]
+	}
+	return result, nil
+}

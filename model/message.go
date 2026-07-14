@@ -23,6 +23,7 @@ const (
 	MsgTypeAck       = "ack"       // 发送确认
 	MsgTypeError     = "error"     // 错误通知
 	MsgTypeHistory   = "history"   // 历史弹幕补偿
+	MsgTypeRetract   = "retract"   // 撤回已广播的弹幕（审核后驳回时使用）
 )
 
 // AckPayload 是 ACK 消息的负载。
@@ -40,6 +41,12 @@ type ErrorPayload struct {
 	RequestID string `json:"request_id,omitempty"`
 	Code      string `json:"code"`    // 错误码
 	Message   string `json:"message"` // 人类可读的错误描述
+}
+
+// RetractPayload 是撤回消息的负载。
+type RetractPayload struct {
+	MessageID string `json:"message_id"`
+	Reason    string `json:"reason,omitempty"`
 }
 
 // HistoryPayload 是历史弹幕补偿的负载。

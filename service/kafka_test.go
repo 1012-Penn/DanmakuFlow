@@ -156,7 +156,7 @@ func (m *mockKafkaProducer) Close() error {
 func TestCreateAndBroadcastKafkaSuccess(t *testing.T) {
 	memStore := store.New()
 	hub := websocket.NewHub()
-	svc := NewDanmakuService(memStore, hub, 0, 0, false, nil, &mockKafkaProducer{shouldFail: false}, nil, "test-instance")
+	svc := NewDanmakuService(memStore, hub, 0, 0, false, nil, &mockKafkaProducer{shouldFail: false}, nil, "test-instance", nil)
 
 	dm, persistence, err := svc.createAndBroadcast(CreateDanmakuRequest{
 		Content: "hello",
@@ -179,7 +179,7 @@ func TestCreateAndBroadcastKafkaSuccess(t *testing.T) {
 func TestCreateAndBroadcastKafkaFailure(t *testing.T) {
 	memStore := store.New()
 	hub := websocket.NewHub()
-	svc := NewDanmakuService(memStore, hub, 0, 0, false, nil, &mockKafkaProducer{shouldFail: true}, nil, "test-instance")
+	svc := NewDanmakuService(memStore, hub, 0, 0, false, nil, &mockKafkaProducer{shouldFail: true}, nil, "test-instance", nil)
 
 	_, _, err := svc.createAndBroadcast(CreateDanmakuRequest{
 		Content: "hello",
@@ -198,7 +198,7 @@ func TestCreateAndBroadcastKafkaFailure(t *testing.T) {
 func TestCreateAndBroadcastKafkaFailureNoPanic(t *testing.T) {
 	memStore := store.New()
 	hub := websocket.NewHub()
-	svc := NewDanmakuService(memStore, hub, 0, 0, false, nil, &mockKafkaProducer{shouldFail: true}, nil, "test-instance")
+	svc := NewDanmakuService(memStore, hub, 0, 0, false, nil, &mockKafkaProducer{shouldFail: true}, nil, "test-instance", nil)
 
 	_, _, err := svc.createAndBroadcast(CreateDanmakuRequest{
 		Content: "no broadcast",

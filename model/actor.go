@@ -10,5 +10,6 @@ type Actor struct {
 	UserID        string
 	Username      string
 	Nickname      string
+	Role          string // "user" / "moderator" / "admin"，仅在 Authenticated=true 时有效
 	Authenticated bool
 }

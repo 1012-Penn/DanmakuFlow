@@ -61,4 +61,8 @@ const (
 	ErrCodePersistenceUnavail = "persistence_unavailable"
 	ErrCodeRoomStatusConflict = "room_status_conflict"
 	ErrCodeForbidden          = "forbidden"
+	ErrCodeContentBlocked     = "content_blocked"
+	ErrCodeUserBanned         = "user_banned"
+	ErrCodeMuted              = "muted"
+	ErrCodeReportNotFound     = "report_not_found"
 )

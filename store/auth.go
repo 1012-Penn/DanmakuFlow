@@ -3,6 +3,7 @@ package store
 import (
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/1012-Penn/DanmakuFlow/model"
 )
@@ -19,6 +20,14 @@ type UserStore interface {
 	FindByID(id string) (*model.User, error)
 	// FindByUsername 通过用户名查找用户。未找到时返回 nil, nil。
 	FindByUsername(username string) (*model.User, error)
+	// UpdateRole 更新用户角色。
+	UpdateRole(id string, role string) error
+	// BanUser 封禁用户。
+	BanUser(id string, reason string, bannedBy string) error
+	// UnbanUser 解封用户。
+	UnbanUser(id string) error
+	// ListBannedUsers 列出所有被封禁的用户。
+	ListBannedUsers() ([]model.User, error)
 }
 
 // MemoryUserStore 使用内存 map 存储用户。
@@ -72,4 +81,64 @@ func (s *MemoryUserStore) FindByUsername(username string) (*model.User, error) {
 		return nil, nil
 	}
 	return user, nil
+}
+
+// UpdateRole 更新用户角色。
+func (s *MemoryUserStore) UpdateRole(id string, role string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	user, ok := s.byID[id]
+	if !ok {
+		return nil
+	}
+	user.Role = role
+	return nil
+}
+
+// BanUser 封禁用户。
+func (s *MemoryUserStore) BanUser(id string, reason string, bannedBy string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	user, ok := s.byID[id]
+	if !ok {
+		return nil
+	}
+	now := time.Now()
+	user.Banned = true
+	user.BannedAt = &now
+	user.BannedReason = reason
+	user.BannedBy = bannedBy
+	return nil
+}
+
+// UnbanUser 解封用户。
+func (s *MemoryUserStore) UnbanUser(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	user, ok := s.byID[id]
+	if !ok {
+		return nil
+	}
+	user.Banned = false
+	user.BannedAt = nil
+	user.BannedReason = ""
+	user.BannedBy = ""
+	return nil
+}
+
+// ListBannedUsers 列出所有被封禁的用户。
+func (s *MemoryUserStore) ListBannedUsers() ([]model.User, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var result []model.User
+	for _, user := range s.byID {
+		if user.Banned {
+			result = append(result, *user)
+		}
+	}
+	return result, nil
 }

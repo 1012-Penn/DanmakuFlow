@@ -33,6 +33,9 @@ var (
 	ErrPersistenceQueueFull = errors.New("persistence queue is full")
 	ErrPersistenceFailed    = errors.New("persistence failed")
 	ErrRoomNotLive          = errors.New("room is not live")
+	ErrContentBlocked       = errors.New("content blocked by moderation")
+	ErrMuted                = errors.New("user is muted in this room")
+	ErrUserBanned           = errors.New("user is banned")
 )
 
 // 弹幕发送相关领域错误。
@@ -110,13 +113,16 @@ type DanmakuService struct {
 	kafkaPingFn      func() bool            // Ping 函数，由内部或测试注入
 	instanceID       string                 // 实例 ID，写入 Kafka event
 
+	// 审核治理服务（nil = 不启用）
+	moderation *ModerationService
+
 	// 接受/在途状态机
 	// 使用 atomic.Int64 避免 sync.WaitGroup.Add 与 Wait 的非法并发
 	accepting atomic.Bool
 	inflight  atomic.Int64
 }
 
-func NewDanmakuService(s store.Store, hub *websocket.Hub, asyncBufferSize int, msgsPerSec float64, hasDSN bool, roomStatusGetter model.RoomStatusGetter, kafkaProducer KafkaProducerInterface, kafkaBrokers []string, instanceID string) *DanmakuService {
+func NewDanmakuService(s store.Store, hub *websocket.Hub, asyncBufferSize int, msgsPerSec float64, hasDSN bool, roomStatusGetter model.RoomStatusGetter, kafkaProducer KafkaProducerInterface, kafkaBrokers []string, instanceID string, moderation *ModerationService) *DanmakuService {
 	svc := &DanmakuService{
 		store:            s,
 		hub:              hub,
@@ -127,6 +133,7 @@ func NewDanmakuService(s store.Store, hub *websocket.Hub, asyncBufferSize int, m
 		kafkaProducer:    kafkaProducer,
 		kafkaBrokers:     kafkaBrokers,
 		instanceID:       instanceID,
+		moderation:       moderation,
 		kafkaPingFn: func() bool {
 			if len(kafkaBrokers) == 0 {
 				return false
@@ -291,6 +298,12 @@ func roomSendErrorCode(err error) string {
 		return model.ErrCodeRoomNotLive
 	case errors.Is(err, ErrPersistenceQueueFull), errors.Is(err, ErrPersistenceFailed):
 		return model.ErrCodePersistenceUnavail
+	case errors.Is(err, ErrContentBlocked):
+		return model.ErrCodeContentBlocked
+	case errors.Is(err, ErrMuted):
+		return model.ErrCodeMuted
+	case errors.Is(err, ErrUserBanned):
+		return model.ErrCodeUserBanned
 	default:
 		return model.ErrCodeValidationError
 	}
@@ -445,6 +458,65 @@ func (s *DanmakuService) createAndBroadcast(req CreateDanmakuRequest) (model.Dan
 		return model.Danmaku{}, "", errors.New("sending too fast, please wait")
 	}
 
+	// 审核检查（ModerationService 为 nil 时跳过）
+	if s.moderation != nil {
+		banned, err := s.moderation.CheckUserBan(req.UserID)
+		if err != nil && s.moderation.IsFailClosed() {
+			return model.Danmaku{}, "", err
+		}
+		if banned {
+			return model.Danmaku{}, "", ErrUserBanned
+		}
+
+		muted, err := s.moderation.CheckMute(req.UserID, req.RoomID)
+		if err != nil && s.moderation.IsFailClosed() {
+			return model.Danmaku{}, "", err
+		}
+		if muted {
+			return model.Danmaku{}, "", ErrMuted
+		}
+
+		blocked, flagged, matchedWord := s.moderation.CheckContent(req.Content)
+		if blocked {
+			slog.Warn("弹幕被屏蔽词拦截",
+				"user_id", req.UserID, "room_id", req.RoomID,
+				"word", matchedWord,
+			)
+			return model.Danmaku{}, "", fmt.Errorf("%w: %s", ErrContentBlocked, matchedWord)
+		}
+		if flagged {
+			// 标记待审：持久化但不广播
+			dm := s.buildDanmaku(req)
+			dm.Status = model.DanmakuStatusFlagged
+			persistence, err := s.persistDanmaku(dm)
+			if err != nil {
+				return model.Danmaku{}, "", err
+			}
+			slog.Info("弹幕已标记待审", "dm_id", dm.ID, "word", matchedWord)
+			return dm, persistence, nil
+		}
+	}
+
+	dm := s.buildDanmaku(req)
+	dm.Status = model.DanmakuStatusApproved
+
+	persistence, err := s.persistDanmaku(dm)
+	if err != nil {
+		return model.Danmaku{}, "", err
+	}
+
+	data, _ := json.Marshal(dm)
+	bcastPayload, _ := json.Marshal(model.MessageEnvelope{
+		Type:    model.MsgTypeBroadcast,
+		Payload: data,
+	})
+	s.hub.BroadcastToRoom(req.RoomID, bcastPayload)
+
+	return dm, persistence, nil
+}
+
+// buildDanmaku 根据请求构建弹幕对象，应用默认值。
+func (s *DanmakuService) buildDanmaku(req CreateDanmakuRequest) model.Danmaku {
 	color := req.Color
 	if color == "" {
 		color = "#ffffff"
@@ -458,7 +530,7 @@ func (s *DanmakuService) createAndBroadcast(req CreateDanmakuRequest) (model.Dan
 		fontSize = 25
 	}
 
-	dm := model.Danmaku{
+	return model.Danmaku{
 		ID:        uuid.New().String(),
 		Content:   req.Content,
 		Color:     color,
@@ -467,11 +539,15 @@ func (s *DanmakuService) createAndBroadcast(req CreateDanmakuRequest) (model.Dan
 		Timestamp: time.Now().UTC().Truncate(time.Millisecond),
 		RoomID:    req.RoomID,
 		UserID:    req.UserID,
+		Status:    model.DanmakuStatusApproved,
 	}
+}
 
+// persistDanmaku 持久化弹幕，返回持久化状态字符串。
+// 支持 Kafka 路径（同步 produce）、异步 channel 路径、直写 MySQL/内存 路径。
+func (s *DanmakuService) persistDanmaku(dm model.Danmaku) (string, error) {
 	persistence := "persisted"
 	if s.kafkaProducer != nil {
-		// Kafka 路径：同步 produce，Kafka 确认后才继续广播
 		produceCtx, produceCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		if err := s.kafkaProducer.Produce(produceCtx, dm); err != nil {
 			produceCancel()
@@ -480,7 +556,7 @@ func (s *DanmakuService) createAndBroadcast(req CreateDanmakuRequest) (model.Dan
 				"room_id", dm.RoomID,
 				"error", err,
 			)
-			return model.Danmaku{}, "", fmt.Errorf("%w: kafka: %v", ErrPersistenceFailed, err)
+			return "", fmt.Errorf("%w: kafka: %v", ErrPersistenceFailed, err)
 		}
 		produceCancel()
 		persistence = "persisted"
@@ -495,7 +571,7 @@ func (s *DanmakuService) createAndBroadcast(req CreateDanmakuRequest) (model.Dan
 				"room_id", dm.RoomID,
 			)
 			metrics.StoreWriteTotal.WithLabelValues("drop").Inc()
-			return model.Danmaku{}, "", ErrPersistenceQueueFull
+			return "", ErrPersistenceQueueFull
 		}
 	} else {
 		writeStart := time.Now()
@@ -507,19 +583,11 @@ func (s *DanmakuService) createAndBroadcast(req CreateDanmakuRequest) (model.Dan
 			)
 			metrics.StoreWriteTotal.WithLabelValues("error").Inc()
 			metrics.StoreWriteLatency.Observe(time.Since(writeStart).Seconds())
-			return model.Danmaku{}, "", fmt.Errorf("%w: %v", ErrPersistenceFailed, err)
+			return "", fmt.Errorf("%w: %v", ErrPersistenceFailed, err)
 		} else {
 			metrics.StoreWriteTotal.WithLabelValues("success").Inc()
 		}
 		metrics.StoreWriteLatency.Observe(time.Since(writeStart).Seconds())
 	}
-
-	data, _ := json.Marshal(dm)
-	bcastPayload, _ := json.Marshal(model.MessageEnvelope{
-		Type:    model.MsgTypeBroadcast,
-		Payload: data,
-	})
-	s.hub.BroadcastToRoom(req.RoomID, bcastPayload)
-
-	return dm, persistence, nil
+	return persistence, nil
 }

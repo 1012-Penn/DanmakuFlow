@@ -17,15 +17,16 @@ import (
 // Config 是应用配置的根结构。
 // yaml tag 指定配置文件中对应的字段名。
 type Config struct {
-	Server    ServerConfig    `yaml:"server"`
-	WebSocket WebSocketConfig `yaml:"websocket"`
-	Store     StoreConfig     `yaml:"store"`
-	Log       LogConfig       `yaml:"log"`
-	Redis     RedisConfig     `yaml:"redis"`
-	Kafka     KafkaConfig     `yaml:"kafka"`
-	RateLimit RateLimitConfig `yaml:"rate_limit"`
-	Pprof     PprofConfig     `yaml:"pprof"`
-	Auth      AuthConfig      `yaml:"auth"`
+	Server     ServerConfig     `yaml:"server"`
+	WebSocket  WebSocketConfig  `yaml:"websocket"`
+	Store      StoreConfig      `yaml:"store"`
+	Log        LogConfig        `yaml:"log"`
+	Redis      RedisConfig      `yaml:"redis"`
+	Kafka      KafkaConfig      `yaml:"kafka"`
+	RateLimit  RateLimitConfig  `yaml:"rate_limit"`
+	Pprof      PprofConfig      `yaml:"pprof"`
+	Auth       AuthConfig       `yaml:"auth"`
+	Moderation ModerationConfig `yaml:"moderation"`
 }
 
 // AuthConfig 存放 JWT 认证相关配置。
@@ -98,6 +99,14 @@ type StoreConfig struct {
 type RedisConfig struct {
 	Addr       string `yaml:"addr"`        // Redis 地址，如 "localhost:6379"。空 = 不使用 Redis
 	InstanceID string `yaml:"instance_id"` // 实例标识（用于去重）。空 = 自动生成
+}
+
+// ModerationConfig 存放弹幕审核治理相关配置。
+type ModerationConfig struct {
+	Blocklist     []string `yaml:"blocklist"`      // 内置屏蔽词列表
+	BlocklistPath string   `yaml:"blocklist_path"` // 屏蔽词文件路径（每行一个词）
+	AutoReject    bool     `yaml:"auto_reject"`    // true=命中屏蔽词直接拒绝；false=标记 flagged 待审
+	FailClosed    bool     `yaml:"fail_closed"`    // true=审核异常时拒绝弹幕；false=放行
 }
 
 // KafkaConfig 存放 Kafka 连接配置。
@@ -175,6 +184,19 @@ func applyEnvOverrides(cfg *Config) *Config {
 	if v := os.Getenv("KAFKA_BROKERS"); v != "" {
 		cfg.Kafka.Brokers = strings.Split(v, ",")
 	}
+	if v := os.Getenv("MODERATION_AUTO_REJECT"); v != "" {
+		if enabled, err := strconv.ParseBool(v); err == nil {
+			cfg.Moderation.AutoReject = enabled
+		}
+	}
+	if v := os.Getenv("MODERATION_FAIL_CLOSED"); v != "" {
+		if enabled, err := strconv.ParseBool(v); err == nil {
+			cfg.Moderation.FailClosed = enabled
+		}
+	}
+	if v := os.Getenv("MODERATION_BLOCKLIST_PATH"); v != "" {
+		cfg.Moderation.BlocklistPath = v
+	}
 	return cfg
 }
 
@@ -219,6 +241,12 @@ func Default() *Config {
 		Auth: AuthConfig{
 			JWTSecret:        "", // 空 = main.go 使用内置默认密钥
 			TokenExpiryHours: 72, // 72 小时
+		},
+		Moderation: ModerationConfig{
+			Blocklist:     nil,
+			BlocklistPath: "",
+			AutoReject:    true,
+			FailClosed:    false,
 		},
 	}
 }

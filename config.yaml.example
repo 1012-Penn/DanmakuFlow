@@ -60,3 +60,13 @@ auth:
   jwt_secret: ""
   # Token 过期时间（小时），默认 72 小时
   token_expiry_hours: 72
+
+moderation:
+  # 内置屏蔽词列表（精确匹配）
+  blocklist: []
+  # 屏蔽词文件路径（每行一个词，与 blocklist 合并）
+  blocklist_path: ""
+  # true=命中屏蔽词直接拒绝；false=标记 flagged 待人工审核
+  auto_reject: true
+  # true=审核服务异常时拒绝弹幕；false=异常时放行（不阻断业务）
+  fail_closed: false

@@ -177,9 +177,47 @@ func main() {
 		}
 	}
 
-	// 组装弹幕服务（注入 RoomStatusGetter 用于房间状态检查）
-	svc := service.NewDanmakuService(s, hub, cfg.Store.AsyncBufferSize, cfg.RateLimit.MessagesPerSec, hasDSN, roomSvc, kafkaProducer, cfg.Kafka.Brokers, instanceID)
+	// 初始化审核治理存储
+	var reportStore store.ReportStore
+	var auditLogStore store.AuditLogStore
+	var muteStore store.MuteStore
+	var danmakuModStore store.DanmakuModerationStore
+	if hasDSN {
+		if mysqlStore, ok := s.(*store.MySQLStore); ok {
+			db := mysqlStore.DB()
+			reportStore, _ = store.NewMySQLReportStore(db)
+			auditLogStore, _ = store.NewMySQLAuditLogStore(db)
+			muteStore, _ = store.NewMySQLMuteStore(db)
+		}
+	}
+	if reportStore == nil {
+		reportStore = store.NewMemoryReportStore()
+		auditLogStore = store.NewMemoryAuditLogStore()
+		muteStore = store.NewMemoryMuteStore()
+	}
+	// 无论是 MemoryStore 还是 MySQLStore，都实现了 DanmakuModerationStore
+	switch st := s.(type) {
+	case *store.MemoryStore:
+		danmakuModStore = st
+	case *store.MySQLStore:
+		danmakuModStore = st
+	}
+
+	// 初始化审核治理服务
+	moderationSvc := service.NewModerationService(
+		danmakuModStore, reportStore, auditLogStore, muteStore, userStore,
+		cfg.Moderation.Blocklist, cfg.Moderation.BlocklistPath,
+		cfg.Moderation.AutoReject, cfg.Moderation.FailClosed,
+	)
+
+	// 组装弹幕服务（注入 RoomStatusGetter 用于房间状态检查，注入 moderation 用于审核）
+	svc := service.NewDanmakuService(s, hub, cfg.Store.AsyncBufferSize, cfg.RateLimit.MessagesPerSec, hasDSN, roomSvc, kafkaProducer, cfg.Kafka.Brokers, instanceID, moderationSvc)
 	h := handler.New(svc, hub, cfg.Store.DefaultListLimit, instanceID)
+
+	// 创建审核治理处理器
+	adminSvc := service.NewAdminService(userStore, auditLogStore)
+	adminHandler := handler.NewAdminHandler(moderationSvc, adminSvc)
+	reportHandler := handler.NewReportHandler(moderationSvc)
 
 	// 将认证服务和房间状态查询器注入 Hub
 	hub.SetAuthValidator(authSvc)
@@ -200,7 +238,10 @@ func main() {
 	dmGroup.Use(handler.AuthMiddleware(authSvc))
 	{
 		dmGroup.POST("/danmaku", h.Create)
+		dmGroup.POST("/report", reportHandler.Report)
 	}
+	// 注册 admin 路由（认证 + 鉴权）
+	adminHandler.RegisterAdminRoutes(r, handler.AuthMiddleware(authSvc), handler.RequireRole(authSvc, "admin", "moderator"))
 	// 条件注册 pprof 路由（默认关闭）
 	if cfg.Pprof.Enabled {
 		pprofGroup := r.Group("/debug/pprof")

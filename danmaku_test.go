@@ -55,7 +55,7 @@ func setupTest(t *testing.T) *testHelper {
 	// 服务层
 	authSvc := service.NewAuthService(userStore, "test-secret", 72)
 	roomSvc := service.NewRoomService(roomSt)
-	svc := service.NewDanmakuService(memStore, hub, 0, 0, false, roomSvc, nil, nil, "test")
+	svc := service.NewDanmakuService(memStore, hub, 0, 0, false, roomSvc, nil, nil, "test", nil)
 
 	// 注入 Hub
 	hub.SetAuthValidator(authSvc)
@@ -175,7 +175,7 @@ func TestMetricsEndpoint(t *testing.T) {
 	s := store.New()
 	roomSt := store.NewMemoryRoomStore()
 	roomSvc := service.NewRoomService(roomSt)
-	svc := service.NewDanmakuService(s, hub, 0, 0, false, roomSvc, nil, nil, "test")
+	svc := service.NewDanmakuService(s, hub, 0, 0, false, roomSvc, nil, nil, "test", nil)
 	h := handler.New(svc, hub, 20, "test-instance")
 	h.RegisterRoutes(r)
 	r.GET("/metrics", gin.WrapH(promhttp.HandlerFor(reg, promhttp.HandlerOpts{})))
@@ -738,7 +738,7 @@ func TestConcurrentCreateAndShutdown(t *testing.T) {
 		s := store.New()
 		roomSt := store.NewMemoryRoomStore()
 		roomSvc := service.NewRoomService(roomSt)
-		svc := service.NewDanmakuService(s, hub, 128, 0, false, roomSvc, nil, nil, "test")
+		svc := service.NewDanmakuService(s, hub, 128, 0, false, roomSvc, nil, nil, "test", nil)
 
 		var wg sync.WaitGroup
 		producerCount := 8

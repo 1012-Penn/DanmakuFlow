@@ -207,6 +207,23 @@ var (
 	}, []string{"error_type"})
 )
 
+// 审核指标。
+var (
+	ModerationActionsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Subsystem: "moderation",
+		Name:      "actions_total",
+		Help:      "审核操作总数，按 action 分类（auto_reject/flag/ban_user/unban_user/mute_user/unmute_user/change_role/report/resolve_report/manual_approve/manual_reject）。",
+	}, []string{"action"})
+
+	ModerationQueueSize = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Subsystem: "moderation",
+		Name:      "queue_size",
+		Help:      "当前待审核队列大小（flagged 弹幕 + pending 举报）。",
+	})
+)
+
 // Register 将所有指标注册到 reg。
 // 应当在 main 中启动时调用一次。重复注册会 panic。
 // 注意：prometheus.DefaultRegisterer 已包含 Go/Process 收集器，不再重复注册。
@@ -246,5 +263,9 @@ func Register(reg prometheus.Registerer) {
 		KafkaProduceLatency,
 		KafkaConsumerMsgTotal,
 		KafkaConsumerErrTotal,
+
+		// 审核
+		ModerationActionsTotal,
+		ModerationQueueSize,
 	)
 }

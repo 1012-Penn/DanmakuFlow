@@ -3,6 +3,7 @@ package store
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/1012-Penn/DanmakuFlow/model"
 	"gorm.io/gorm"
@@ -59,6 +60,42 @@ func (s *MySQLUserStore) FindByUsername(username string) (*model.User, error) {
 		return nil, fmt.Errorf("find user by username: %w", err)
 	}
 	return &user, nil
+}
+
+// UpdateRole 更新用户角色。
+func (s *MySQLUserStore) UpdateRole(id string, role string) error {
+	return s.db.Model(&model.User{}).Where("id = ?", id).Update("role", role).Error
+}
+
+// BanUser 封禁用户。
+func (s *MySQLUserStore) BanUser(id string, reason string, bannedBy string) error {
+	now := time.Now()
+	return s.db.Model(&model.User{}).Where("id = ?", id).Updates(map[string]interface{}{
+		"banned":        true,
+		"banned_at":     &now,
+		"banned_reason": reason,
+		"banned_by":     bannedBy,
+	}).Error
+}
+
+// UnbanUser 解封用户。
+func (s *MySQLUserStore) UnbanUser(id string) error {
+	return s.db.Model(&model.User{}).Where("id = ?", id).Updates(map[string]interface{}{
+		"banned":        false,
+		"banned_at":     nil,
+		"banned_reason": "",
+		"banned_by":     "",
+	}).Error
+}
+
+// ListBannedUsers 列出所有被封禁的用户。
+func (s *MySQLUserStore) ListBannedUsers() ([]model.User, error) {
+	var users []model.User
+	err := s.db.Where("banned = ?", true).Find(&users).Error
+	if err != nil {
+		return nil, fmt.Errorf("list banned users: %w", err)
+	}
+	return users, nil
 }
 
 // isDuplicateEntry 判断 MySQL 错误是否为唯一键冲突。

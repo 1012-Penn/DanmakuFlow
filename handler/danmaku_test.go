@@ -37,7 +37,7 @@ func TestReadyzCombinations(t *testing.T) {
 				return websocket.NewHubWithConfig(websocket.Config{}, nil)
 			},
 			setupSvc: func(s store.Store, hub *websocket.Hub) *service.DanmakuService {
-				return service.NewDanmakuService(s, hub, 0, 0, false, nil, nil, nil, "test")
+				return service.NewDanmakuService(s, hub, 0, 0, false, nil, nil, nil, "test", nil)
 			},
 			expectStatus:  http.StatusOK,
 			expectOverall: "ok",
@@ -51,7 +51,7 @@ func TestReadyzCombinations(t *testing.T) {
 				return websocket.NewHubWithConfig(websocket.Config{}, nil)
 			},
 			setupSvc: func(s store.Store, hub *websocket.Hub) *service.DanmakuService {
-				return service.NewDanmakuService(s, hub, 0, 0, false, nil, &failPingProducer{}, nil, "test")
+				return service.NewDanmakuService(s, hub, 0, 0, false, nil, &failPingProducer{}, nil, "test", nil)
 			},
 			expectStatus:  http.StatusOK,
 			expectOverall: "degraded",
@@ -67,7 +67,7 @@ func TestReadyzCombinations(t *testing.T) {
 				return hub
 			},
 			setupSvc: func(s store.Store, hub *websocket.Hub) *service.DanmakuService {
-				return service.NewDanmakuService(s, hub, 0, 0, false, nil, nil, nil, "test")
+				return service.NewDanmakuService(s, hub, 0, 0, false, nil, nil, nil, "test", nil)
 			},
 			expectStatus:  http.StatusOK,
 			expectOverall: "degraded",

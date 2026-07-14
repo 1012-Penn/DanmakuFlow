@@ -20,6 +20,7 @@ type AuthClaims struct {
 	UserID   string `json:"user_id"`
 	Username string `json:"username"`
 	Nickname string `json:"nickname"`
+	Role     string `json:"role"`
 	jwt.RegisteredClaims
 }
 
@@ -143,21 +144,36 @@ func (s *AuthService) ValidateToken(tokenString string) (*model.Actor, error) {
 	if !ok || !token.Valid {
 		return nil, ErrInvalidToken
 	}
+	role := claims.Role
+	if role == "" {
+		role = model.RoleUser
+	}
 	return &model.Actor{
 		UserID:        claims.UserID,
 		Username:      claims.Username,
 		Nickname:      claims.Nickname,
+		Role:          role,
 		Authenticated: true,
 	}, nil
+}
+
+// GetUser 获取用户信息。用于 RequireRole 中间件实时查询用户角色。
+func (s *AuthService) GetUser(userID string) (*model.User, error) {
+	return s.userStore.FindByID(userID)
 }
 
 // generateToken 为用户签发 JWT token（HS256），有效期 72 小时。
 func (s *AuthService) generateToken(user *model.User) (string, error) {
 	now := time.Now()
+	role := user.Role
+	if role == "" {
+		role = model.RoleUser
+	}
 	claims := &AuthClaims{
 		UserID:   user.ID,
 		Username: user.Username,
 		Nickname: user.Nickname,
+		Role:     role,
 		RegisteredClaims: jwt.RegisteredClaims{
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(now.Add(time.Duration(s.expiryHours) * time.Hour)),

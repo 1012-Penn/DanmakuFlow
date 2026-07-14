@@ -66,6 +66,12 @@ func danmakuErrorResponse(err error) (int, string) {
 		return http.StatusConflict, "room_not_live"
 	case errors.Is(err, service.ErrPersistenceQueueFull), errors.Is(err, service.ErrPersistenceFailed):
 		return http.StatusServiceUnavailable, "persistence_unavailable"
+	case errors.Is(err, service.ErrContentBlocked):
+		return http.StatusBadRequest, "content_blocked"
+	case errors.Is(err, service.ErrMuted):
+		return http.StatusForbidden, "muted"
+	case errors.Is(err, service.ErrUserBanned):
+		return http.StatusForbidden, "user_banned"
 	default:
 		return http.StatusBadRequest, "validation_error"
 	}

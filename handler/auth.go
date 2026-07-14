@@ -122,6 +122,7 @@ func AuthMiddleware(authService *service.AuthService) gin.HandlerFunc {
 		c.Set("user_id", actor.UserID)
 		c.Set("username", actor.Username)
 		c.Set("nickname", actor.Nickname)
+		c.Set("role", actor.Role)
 		c.Next()
 	}
 }
@@ -147,6 +148,7 @@ func OptionalAuthMiddleware(authService *service.AuthService) gin.HandlerFunc {
 		c.Set("user_id", actor.UserID)
 		c.Set("username", actor.Username)
 		c.Set("nickname", actor.Nickname)
+		c.Set("role", actor.Role)
 		c.Next()
 	}
 }
@@ -172,4 +174,42 @@ func (h *AuthHandler) RegisterAuthRoutes(r *gin.Engine, authService *service.Aut
 
 	// 登录页面
 	r.StaticFile("/login", "./templates/login.html")
+}
+
+// RequireRole 返回一个中间件，检查用户是否拥有指定角色之一。
+// 从数据库实时查询用户角色（而非 JWT），确保角色变更即时生效。
+// 使用方式：
+//
+//	adminGroup.Use(AuthMiddleware(authSvc))
+//	adminGroup.Use(RequireRole(authSvc, "admin", "moderator"))
+func RequireRole(authService *service.AuthService, roles ...string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userID, exists := c.Get("user_id")
+		if !exists {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+			return
+		}
+
+		uid, ok := userID.(string)
+		if !ok || uid == "" {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+			return
+		}
+
+		user, err := authService.GetUser(uid)
+		if err != nil || user == nil {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "user not found"})
+			return
+		}
+
+		for _, role := range roles {
+			if user.Role == role {
+				c.Set("user_role", user.Role)
+				c.Next()
+				return
+			}
+		}
+
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
+	}
 }

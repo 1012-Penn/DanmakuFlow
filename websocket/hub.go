@@ -240,6 +240,23 @@ func (h *Hub) BroadcastToRoom(roomID string, data []byte) {
 	}
 }
 
+// BroadcastToRoomLocal 仅本地广播，不跨实例发布到 Redis。
+//
+// 用于 redisSubscribeLoop 收到其他实例的 Redis 消息时调用，
+// 避免消息被再次发布回 Redis 形成广播回环。
+func (h *Hub) BroadcastToRoomLocal(roomID string, data []byte) {
+	if h.shuttingDown.Load() {
+		return
+	}
+	if room, ok := h.GetRoom(roomID); ok {
+		select {
+		case room.broadcast <- data:
+		default:
+			metrics.WSBroadcastDrops.Inc()
+		}
+	}
+}
+
 // GetOrCreateRoom 获取或创建房间。shutdown 时返回 nil。
 func (h *Hub) GetOrCreateRoom(roomID string) *Room {
 	if h.shuttingDown.Load() {
@@ -389,7 +406,10 @@ func (h *Hub) redisSubscribeLoop(ctx context.Context) {
 	}
 	ch := h.redisClient.StartSubscription(ctx)
 	for msg := range ch {
-		h.BroadcastToRoom(msg.RoomID, msg.Data)
+		// 仅本地广播——消息来自 Redis 本身，不需要再发回 Redis。
+		// 如果调 BroadcastToRoom 会触发 redisPublishLoop 再次发布，
+		// 其他实例收到后再发布回来，形成广播回环。
+		h.BroadcastToRoomLocal(msg.RoomID, msg.Data)
 	}
 }
 
